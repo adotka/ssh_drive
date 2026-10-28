@@ -33,6 +33,9 @@ USER_AGENT = "SSHDrive/1.0"
 # (хэш — из SHA256SUMS нужного релиза, лучше после проверки его PGP-подписи).
 PINNED_VERSION = "v1.75.2"
 PINNED_SHA256 = "8a9db2bad1dc79a65b3348fd857069598e2aab7cf4d118b77b1df23055aff818"
+# SHA256 самого rclone.exe из этого архива. Нужен, чтобы доверять rclone.exe,
+# лежащему рядом с программой: в «Загрузках» там мог оказаться любой файл.
+PINNED_EXE_SHA256 = "41eab3e118d264920b62c3327966c5ece0dc4dd715ee617d9e30450d8ead95a4"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -62,18 +65,39 @@ def find_exe() -> str | None:
     override = os.environ.get("SSHDRIVE_RCLONE")
     if override and Path(override).is_file():
         return str(Path(override))
-    # rclone, установленный вместе с программой (MSI) или лежащий рядом с exe
+    # rclone рядом с exe (MSI, портативная папка): берём только тот, что
+    # байт в байт совпадает с закреплённой версией. Иначе любой rclone.exe,
+    # скачанный в ту же папку, получил бы пароли раньше нашего.
     beside_exe = paths.install_dir() / "rclone.exe"
-    if beside_exe.is_file():
+    if is_pinned_exe(beside_exe):
         return str(beside_exe)
     local = paths.rclone_exe()
     if local.is_file():
         return str(local)
     # rclone, встроенный в offline-сборку exe (его SHA256 сверен при сборке)
     bundled = paths.bundled_file("rclone.exe")
-    if bundled is not None:
+    if bundled is not None and is_pinned_exe(bundled):
         return str(bundled)
     return _which_safe()
+
+
+@lru_cache(maxsize=8)
+def _sha256_of(path: str, mtime_ns: int, size: int) -> str:  # noqa: ARG001 - ключ кэша
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def is_pinned_exe(path: str | Path) -> bool:
+    """Файл существует и совпадает с rclone.exe закреплённой версии."""
+    path = Path(path)
+    try:
+        info = path.stat()
+        return _sha256_of(str(path), info.st_mtime_ns, info.st_size) == PINNED_EXE_SHA256
+    except OSError:
+        return False
 
 
 def _which_safe() -> str | None:
@@ -189,6 +213,8 @@ def download_executable(progress: Progress | None = None, log: Log | None = None
             if member is None:
                 raise RcloneError("В архиве rclone не найден rclone.exe")
             data = zf.read(member)
+        if hashlib.sha256(data).hexdigest() != PINNED_EXE_SHA256:
+            raise RcloneError("rclone.exe в архиве не совпал с закреплённым — установка отменена.")
 
         paths.bin_dir().mkdir(parents=True, exist_ok=True)
         target = paths.rclone_exe()

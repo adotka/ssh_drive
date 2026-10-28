@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import tempfile
 import urllib.request
@@ -17,6 +18,9 @@ URL = (
     "https://github.com/wixtoolset/wix3/releases/download/"
     "wix3141rtm/wix314-binaries.zip"
 )
+# SHA256 архива, снятый при закреплении версии (GitHub его для WiX не публикует).
+# Меняете URL — обновите и хэш.
+SHA256 = "6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31"
 
 
 def main() -> int:
@@ -28,6 +32,15 @@ def main() -> int:
     request = urllib.request.Request(URL, headers={"User-Agent": "SSHDrive-build"})
     with urllib.request.urlopen(request, timeout=180) as response:
         data = response.read()
+
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != SHA256:
+        print(
+            "Контрольная сумма WiX не совпала — архив повреждён или подменён.\n"
+            f"  ожидалась {SHA256}\n  получена  {actual}",
+            file=sys.stderr,
+        )
+        return 1
 
     TARGET.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as handle:

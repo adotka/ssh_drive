@@ -234,6 +234,8 @@ class BundledMsiTests(TempEnv):
         bundled = self.root / "rclone.exe"
         bundled.write_text("x")
         with mock.patch.dict(os.environ, {"PATH": "", "SSHDRIVE_RCLONE": ""}), \
+                mock.patch.object(rclone, "PINNED_EXE_SHA256", hashlib.sha256(b"x").hexdigest()), \
+                mock.patch.object(paths, "install_dir", return_value=self.root / "nowhere"), \
                 mock.patch.object(paths, "bundled_file", return_value=bundled):
             self.assertEqual(rclone.find_exe(), str(bundled))
 
@@ -256,7 +258,9 @@ class DownloadTests(TempEnv):
     def test_matching_hash_installs(self) -> None:
         blob = self._zip()
         digest = hashlib.sha256(blob).hexdigest()
+        exe_digest = hashlib.sha256(b"MZ-fake-rclone").hexdigest()
         with mock.patch.object(rclone, "PINNED_SHA256", digest), \
+                mock.patch.object(rclone, "PINNED_EXE_SHA256", exe_digest), \
                 mock.patch.object(rclone, "_fetch", lambda url, dest, progress=None: dest.write_bytes(blob)):
             exe = rclone.download_executable()
         self.assertEqual(Path(exe).read_bytes(), b"MZ-fake-rclone")

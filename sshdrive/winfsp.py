@@ -7,10 +7,8 @@ WinFsp — единственная внешняя зависимость: эт�
 
 from __future__ import annotations
 
-import base64
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -18,7 +16,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-from . import paths
+from . import paths, pwsh
 
 Progress = Callable[[int, int], None]
 Log = Callable[[str], None]
@@ -140,14 +138,8 @@ def latest_msi() -> tuple[str, str]:
     raise RuntimeError("В последнем релизе WinFsp не найден MSI-файл")
 
 
-def _ps_quote(value: str) -> str:
-    """Строка для PowerShell в одинарных кавычках (в т. ч. типографских)."""
-    return "'" + re.sub("(['\u2018\u2019\u201a\u201b])", r"\1\1", value) + "'"
-
-
-def _ps_encoded(script: str) -> list[str]:
-    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-    return ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
+_ps_quote = pwsh.quote
+_ps_encoded = pwsh.encoded_args
 
 
 def _signers_literal() -> str:

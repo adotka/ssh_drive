@@ -25,6 +25,9 @@ def main() -> int:
     paths.rclone_exe = lambda: BUILD / "rclone.exe"  # type: ignore[assignment]
 
     exe = BUILD / "rclone.exe"
+    if exe.is_file() and not rclone.is_pinned_exe(exe):
+        print(f"{exe} не совпадает с закреплённой версией — скачиваю заново")
+        exe.unlink()
     if exe.is_file():
         print(f"rclone уже есть: {exe}")
     else:
