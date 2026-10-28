@@ -96,6 +96,13 @@ def resource_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def install_dir() -> Path:
+    """Каталог рядом с exe (при установке из MSI) или корень проекта."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
 def bundled_file(name: str) -> Path | None:
     """Файл, положенный рядом с exe/в exe (rclone.exe, MSI, README)."""
     candidate = resource_dir() / name
@@ -103,4 +110,10 @@ def bundled_file(name: str) -> Path | None:
 
 
 def bundled_glob(pattern: str) -> list[Path]:
-    return sorted(path for path in resource_dir().glob(pattern) if path.is_file())
+    """Файлы по маске рядом с exe и среди встроенных в exe."""
+    result: list[Path] = []
+    for base in (install_dir(), resource_dir()):
+        for path in sorted(base.glob(pattern)):
+            if path.is_file() and path not in result:
+                result.append(path)
+    return result

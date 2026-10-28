@@ -35,10 +35,13 @@ def main() -> int:
     print(f"rclone: {exe} ({exe.stat().st_size // (1024 * 1024)} МБ)")
 
     msi = winfsp.download(log=lambda message: print("winfsp:", message))
-    target = BUILD / msi.name
-    if msi.resolve() != target.resolve():
-        shutil.copy2(msi, target)
-    print(f"WinFsp MSI: {target} ({target.stat().st_size // 1024} КБ)")
+    versioned = BUILD / msi.name
+    if msi.resolve() != versioned.resolve():
+        shutil.copy2(msi, versioned)
+    plain = BUILD / "winfsp.msi"
+    if msi.resolve() != plain.resolve():
+        shutil.copy2(msi, plain)
+    print(f"WinFsp MSI: {versioned} ({versioned.stat().st_size // 1024} КБ)")
     return 0
 
 

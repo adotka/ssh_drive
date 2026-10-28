@@ -12,7 +12,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from . import keys, paths, rclone, sshutil, winfsp
+from . import autostart, keys, paths, rclone, sshutil, winfsp
 from .dialogs import KnownHostsDialog, ProfileDialog, ask_secret
 from .profiles import Profile, ProfileStore
 from .secretstore import protect, try_unprotect
@@ -28,10 +28,11 @@ LEVEL_COLORS = {
 
 
 class App(tk.Tk):
-    def __init__(self, smoke: bool = False) -> None:
+    def __init__(self, smoke: bool = False, start_hidden: bool = False) -> None:
         super().__init__()
         paths.ensure_dirs()
         self.smoke = smoke
+        self.start_hidden = start_hidden
         self.store = ProfileStore()
         self.mounts: dict[str, rclone.MountHandle] = {}
         self.states: dict[str, str] = {}
@@ -48,6 +49,7 @@ class App(tk.Tk):
         self._tray_hint_shown = False
         self.tray: TrayIcon | None = None
         self.tray_ok = False
+        self.autostart_var = tk.BooleanVar(value=autostart.is_enabled())
 
         self.title("SSH Drive — SSH-папка как диск Windows")
         self.geometry("1020x660")
@@ -99,8 +101,29 @@ class App(tk.Tk):
         if self.tray_ok:
             self.tray.set_tooltip("SSH Drive — дисков: 0")
             self.log("Иконка в трее активна: закрытие окна сворачивает программу", "dim")
+            if self.start_hidden:
+                self.withdraw()
+                self.tray.notify("SSH Drive запущен в трее. Диски подключаются автоматически.")
+                self.log("Запуск свёрнутым в трей (--tray)", "dim")
         else:
             self.log(f"Не удалось показать иконку в трее: {tray.error or 'неизвестная ошибка'}", "warn")
+
+    def _toggle_autostart(self) -> None:
+        want = bool(self.autostart_var.get())
+        try:
+            if want:
+                autostart.enable()
+            else:
+                autostart.disable()
+        except Exception as exc:  # noqa: BLE001 - показываем пользователю
+            self.autostart_var.set(not want)
+            self.log(f"Автозапуск: {exc}", "err")
+            messagebox.showerror("Автозапуск", f"Не удалось изменить автозапуск:\n{exc}")
+            return
+        if want:
+            self.log("Автозапуск при входе в Windows включён (запуск в трее)", "ok")
+        else:
+            self.log("Автозапуск при входе в Windows выключен")
 
     def hide_to_tray(self) -> None:
         if not self.tray_ok:
@@ -195,6 +218,12 @@ class App(tk.Tk):
         tools.add_command(label="Проверить окружение", command=self._check_environment)
         tools.add_command(label="Скачать / обновить rclone", command=self._download_rclone)
         tools.add_command(label="Установить WinFsp", command=self._install_winfsp)
+        tools.add_separator()
+        tools.add_checkbutton(
+            label="Запускать при входе в Windows",
+            variable=self.autostart_var,
+            command=self._toggle_autostart,
+        )
         tools.add_separator()
         tools.add_command(label="Известные хосты…", command=self._show_known_hosts)
         tools.add_command(label="Открыть папку данных", command=self._open_data_dir)
@@ -1028,10 +1057,13 @@ class App(tk.Tk):
             messagebox.showerror("Папка данных", str(exc))
 
     def _open_readme(self) -> None:
-        readme = paths.bundled_file("README.md")
-        if readme is None:
-            readme = Path(__file__).resolve().parent.parent / "README.md"
-        if readme.exists():
+        candidates = [
+            paths.bundled_file("README.md"),
+            paths.install_dir() / "README.md",
+            Path(__file__).resolve().parent.parent / "README.md",
+        ]
+        readme = next((p for p in candidates if p is not None and p.exists()), None)
+        if readme is not None:
             os.startfile(str(readme))  # noqa: S606
         else:
             messagebox.showinfo("Справка", "README.md не найден рядом с программой.")
@@ -1044,7 +1076,7 @@ class App(tk.Tk):
     def _about(self) -> None:
         messagebox.showinfo(
             "SSH Drive",
-            "SSH Drive 1.2\n\n"
+            "SSH Drive 1.0\n\n"
             "Монтирует папку SSH-сервера как диск Windows.\n"
             "Движок: rclone + WinFsp, интерфейс: tkinter.\n"
             "Закрытие окна сворачивает программу в трей; выход — через меню иконки.\n"
@@ -1147,7 +1179,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         root.destroy()
         return 0
-    app = App(smoke=smoke)
+    app = App(smoke=smoke, start_hidden=("--tray" in argv))
     if smoke:
         app.after(1800, app.destroy)
     app.mainloop()

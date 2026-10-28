@@ -126,7 +126,7 @@ def latest_msi() -> tuple[str, str]:
 
 
 def download(progress: Progress | None = None, log: Log | None = None) -> Path:
-    bundled = paths.bundled_glob("winfsp-*.msi")
+    bundled = paths.bundled_glob("winfsp*.msi")
     if bundled:
         if log:
             log(f"Использую встроенный установщик {bundled[0].name}")
