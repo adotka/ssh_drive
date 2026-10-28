@@ -87,6 +87,50 @@ class PlantedRcloneTests(TempEnv):
         self.assertRegex(rclone.PINNED_EXE_SHA256, r"^[0-9a-f]{64}$")
 
 
+class RestrictToOwnerTests(unittest.TestCase):
+    """Windows-ветка restrict_to_owner: SID вместо имени и честный результат."""
+
+    def setUp(self) -> None:
+        paths._SID_CACHE.clear()
+        self.addCleanup(paths._SID_CACHE.clear)
+        self.calls: list[list[str]] = []
+
+    def _fake(self, whoami_out: str, icacls_rc: int):
+        def run(args, **kw):
+            self.calls.append(list(args))
+            if args[0].lower().endswith("whoami.exe"):
+                return subprocess.CompletedProcess(args, 0, stdout=whoami_out, stderr="")
+            return subprocess.CompletedProcess(args, icacls_rc, stdout="", stderr="")
+        return run
+
+    def test_uses_sid_of_current_user(self) -> None:
+        out = '"azuread\\jane doe","S-1-12-1-111-222-333-444"\r\n'
+        with mock.patch.object(subprocess, "run", self._fake(out, 0)):
+            self.assertTrue(paths._restrict_windows("C:/k/id_ed25519"))
+        icacls = self.calls[-1]
+        self.assertTrue(icacls[0].lower().endswith("icacls.exe"))
+        self.assertIn("*S-1-12-1-111-222-333-444:F", icacls)
+        self.assertIn("/inheritance:r", icacls)
+
+    def test_failure_is_reported_not_swallowed(self) -> None:
+        out = '"pc\\u","S-1-5-21-1-2-3-1001"'
+        with mock.patch.object(subprocess, "run", self._fake(out, 1332)):
+            self.assertFalse(paths._restrict_windows("C:/k/id_ed25519"))
+
+    def test_falls_back_to_name_without_sid(self) -> None:
+        with mock.patch.object(subprocess, "run", self._fake("garbage", 0)), \
+                mock.patch.dict(os.environ, {"USERNAME": "u", "USERDOMAIN": "PC"}):
+            self.assertTrue(paths._restrict_windows("C:/k/x"))
+        self.assertIn("PC\\u:F", self.calls[-1])
+
+    def test_sid_is_looked_up_once(self) -> None:
+        out = '"pc\\u","S-1-5-21-1-2-3-1001"'
+        with mock.patch.object(subprocess, "run", self._fake(out, 0)):
+            for _ in range(3):
+                paths._restrict_windows("C:/k/x")
+        self.assertEqual(sum(1 for c in self.calls if c[0].lower().endswith("whoami.exe")), 1)
+
+
 class PowerShellQuotingTests(unittest.TestCase):
     def test_all_quote_kinds_are_doubled(self) -> None:
         self.assertEqual(pwsh.quote("O'Brien"), "'O''Brien'")
@@ -158,6 +202,28 @@ class FetchWixTests(TempEnv):
 
     def test_pinned_hash_looks_sane(self) -> None:
         self.assertRegex(self._module().SHA256, r"^[0-9a-f]{64}$")
+
+    def test_unverified_existing_wix_dir_is_replaced(self) -> None:
+        module = self._module()
+        stale = self.root / "wix"
+        stale.mkdir()
+        (stale / "candle.exe").write_bytes(b"old, never verified")
+        (stale / "light.exe").write_bytes(b"old, never verified")
+        blob = self._zip()
+        with mock.patch.object(module, "SHA256", hashlib.sha256(blob).hexdigest()):
+            self.assertEqual(self._run(module, blob), 0)
+        self.assertEqual((stale / "light.exe").read_bytes(), b"l", "старые файлы заменены проверенными")
+        self.assertTrue((stale / module.MARKER).is_file())
+
+    def test_verified_wix_dir_is_reused_without_download(self) -> None:
+        module = self._module()
+        blob = self._zip()
+        digest = hashlib.sha256(blob).hexdigest()
+        with mock.patch.object(module, "SHA256", digest):
+            self.assertEqual(self._run(module, blob), 0)
+            with mock.patch.object(module.urllib.request, "urlopen", side_effect=AssertionError("не качать")), \
+                    mock.patch.object(module, "TARGET", self.root / "wix"):
+                self.assertEqual(module.main(), 0)
 
 
 if __name__ == "__main__":

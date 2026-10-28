@@ -138,16 +138,38 @@ class ThrottleTests(unittest.TestCase):
             self.now[0] += 10_000
         self.assertEqual(last, 900.0)
 
-    def test_success_and_old_failures_reset_the_count(self) -> None:
+    def test_successful_login_does_not_reset_failures(self) -> None:
+        # Иначе любой рабочий пароль с того же адреса обнулял бы счётчик подбора.
         for _ in range(4):
-            self.t.failure("a")
-        self.t.success("a")
-        self.assertEqual(self.t.failure("a"), 0.0)
+            self.assertTrue(self.t.begin_attempt("a"))
+            self.t.end_attempt("a", ok=False)
+        self.assertTrue(self.t.begin_attempt("a"))
+        self.assertEqual(self.t.end_attempt("a", ok=True), 0.0)
+        self.assertTrue(self.t.begin_attempt("a"))
+        self.assertEqual(self.t.end_attempt("a", ok=False), 60.0)
+
+    def test_old_failures_expire_by_window(self) -> None:
         for _ in range(3):
             self.t.failure("b")
         self.now[0] += 301  # окно истекло
         self.assertEqual(self.t.failure("b"), 0.0)
         self.assertEqual(self.t.failure("b"), 0.0)
+
+    def test_attempts_in_flight_count_toward_the_limit(self) -> None:
+        # Пять паролей проверяются одновременно — шестой ждать не должен.
+        for _ in range(5):
+            self.assertTrue(self.t.begin_attempt("c"))
+        self.assertFalse(self.t.begin_attempt("c"))
+        self.assertTrue(self.t.begin_attempt("d"), "другой адрес не затронут")
+        blocks = [self.t.end_attempt("c", ok=False) for _ in range(5)]
+        self.assertEqual(blocks[-1], 60.0)
+        self.assertFalse(self.t.begin_attempt("c"), "заблокирован")
+
+    def test_finished_successful_attempts_free_their_slot(self) -> None:
+        for _ in range(20):
+            self.assertTrue(self.t.begin_attempt("e"))
+            self.t.end_attempt("e", ok=True)
+        self.assertEqual(self.t._inflight.get("e", 0), 0)
 
     def test_pending_and_open_limits(self) -> None:
         t = AuthThrottle(max_pending=2, max_open=3)
@@ -172,6 +194,16 @@ class ThrottleTests(unittest.TestCase):
             self.t.failure("trigger")
         self.assertLess(len(self.t._blocked_until), 10)
         self.assertLess(len(self.t._failures), 10)
+
+    def test_failures_below_the_limit_are_pruned_too(self) -> None:
+        # Много адресов, у каждого меньше пяти неудач, — блокировка не наступает,
+        # но таблица всё равно не должна расти бесконечно.
+        for i in range(1100):
+            self.t.failure(f"10.1.{i // 250}.{i % 250}")
+        self.now[0] += 301
+        for i in range(30):
+            self.t.failure(f"10.2.0.{i}")
+        self.assertLess(len(self.t._failures), 1100)
 
 
 # --- настоящий сервер -----------------------------------------------------------

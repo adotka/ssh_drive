@@ -66,12 +66,17 @@ def verify_password_hash(plain: str, stored: str) -> bool:
 _DUMMY_HASH = ""
 
 
-def burn_password_check(plain: str) -> None:
-    """Тратит столько же времени, сколько реальная проверка (неизвестный пользователь)."""
+def ensure_dummy_hash() -> str:
+    """Хэш-«пустышка» для неизвестных пользователей (считается один раз)."""
     global _DUMMY_HASH
     if not _DUMMY_HASH:
         _DUMMY_HASH = hash_password("dummy-password-for-timing")
-    verify_password_hash(plain, _DUMMY_HASH)
+    return _DUMMY_HASH
+
+
+def burn_password_check(plain: str) -> None:
+    """Тратит столько же времени, сколько реальная проверка (неизвестный пользователь)."""
+    verify_password_hash(plain, ensure_dummy_hash())
 
 
 @dataclass

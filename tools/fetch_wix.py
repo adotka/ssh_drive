@@ -6,8 +6,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import shutil
 import sys
-import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -21,12 +22,20 @@ URL = (
 # SHA256 архива, снятый при закреплении версии (GitHub его для WiX не публикует).
 # Меняете URL — обновите и хэш.
 SHA256 = "6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31"
+# Отметка «этот каталог распакован из архива с таким хэшем». Без неё уже лежащий
+# build/wix (например, от версии скрипта без проверки) на веру не принимается.
+MARKER = ".verified-sha256"
 
 
 def main() -> int:
-    if (TARGET / "candle.exe").is_file() and (TARGET / "light.exe").is_file():
-        print(f"WiX уже распакован: {TARGET}")
+    marker = TARGET / MARKER
+    ready = (TARGET / "candle.exe").is_file() and (TARGET / "light.exe").is_file()
+    if ready and marker.is_file() and marker.read_text(encoding="ascii").strip() == SHA256:
+        print(f"WiX уже распакован и проверен: {TARGET}")
         return 0
+    if TARGET.exists():
+        print(f"{TARGET} не проверен или устарел — скачиваю заново")
+        shutil.rmtree(TARGET)
 
     print("Скачиваю WiX Toolset 3.14…")
     request = urllib.request.Request(URL, headers={"User-Agent": "SSHDrive-build"})
@@ -43,18 +52,14 @@ def main() -> int:
         return 1
 
     TARGET.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as handle:
-        handle.write(data)
-        archive = Path(handle.name)
-    try:
-        with zipfile.ZipFile(archive) as zf:
-            zf.extractall(TARGET)
-    finally:
-        archive.unlink(missing_ok=True)
+    # Распаковываем те же байты, что проверили (без промежуточного файла).
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        zf.extractall(TARGET)
 
     if not (TARGET / "light.exe").is_file():
         print("в архиве WiX не найден light.exe", file=sys.stderr)
         return 1
+    marker.write_text(SHA256 + "\n", encoding="ascii")
     print(f"WiX готов: {TARGET}")
     return 0
 

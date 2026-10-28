@@ -10,12 +10,13 @@ import asyncio
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
 import asyncssh
 
-from .config import ShareConfig, ShareUser, burn_password_check
+from .config import ShareConfig, ShareUser, burn_password_check, ensure_dummy_hash
 from .hostkey import fingerprint, load_or_create
 
 Log = Callable[[str, str], None]
@@ -30,6 +31,12 @@ class AuthThrottle:
 
     * после max_failures неверных паролей с одного адреса за window секунд адрес
       блокируется на block_base секунд, при повторе срок удваивается (до block_max);
+    * одновременно проверяемые пароли тоже считаются: неудачи плюс попытки «в
+      полёте» не превышают max_failures, иначе параллельные соединения успевали бы
+      проверить больше паролей до блокировки;
+    * успешный вход счётчик НЕ обнуляет: иначе обладатель любого рабочего пароля
+      (например, гостевого) мог бы бесконечно подбирать чужой с того же адреса;
+      неудачи истекают сами через window секунд;
     * без входа с одного адреса можно держать не больше max_pending соединений,
       всего с одного адреса — не больше max_open (rclone открывает несколько
       соединений сразу, поэтому лимит общих соединений больше).
@@ -56,6 +63,7 @@ class AuthThrottle:
         self.max_open = max_open
         self._clock = clock
         self._failures: dict[str, list[float]] = {}
+        self._inflight: dict[str, int] = {}
         self._blocked_until: dict[str, float] = {}
         self._strikes: dict[str, int] = {}
         self._pending: dict[str, int] = {}
@@ -66,6 +74,22 @@ class AuthThrottle:
         remaining = self._blocked_until.get(ip, 0.0) - self._clock()
         return remaining if remaining > 0 else 0.0
 
+    def begin_attempt(self, ip: str) -> bool:
+        """Можно ли проверять пароль сейчас. True резервирует место до end_attempt()."""
+        if self.blocked_for(ip):
+            return False
+        now = self._clock()
+        recent = sum(1 for t in self._failures.get(ip, []) if now - t < self.window)
+        if recent + self._inflight.get(ip, 0) >= self.max_failures:
+            return False
+        self._inflight[ip] = self._inflight.get(ip, 0) + 1
+        return True
+
+    def end_attempt(self, ip: str, ok: bool) -> float:
+        """Завершает попытку; для неверного пароля возвращает срок блокировки (или 0)."""
+        self._dec(self._inflight, ip)
+        return 0.0 if ok else self.failure(ip)
+
     def failure(self, ip: str) -> float:
         """Учитывает неверный пароль; возвращает срок блокировки (0 — не заблокирован)."""
         now = self._clock()
@@ -73,6 +97,8 @@ class AuthThrottle:
         recent.append(now)
         if len(recent) < self.max_failures:
             self._failures[ip] = recent
+            if len(self._failures) > 1024:
+                self._prune(now)
             return 0.0
         self._failures.pop(ip, None)
         strikes = self._strikes.get(ip, 0) + 1
@@ -81,10 +107,6 @@ class AuthThrottle:
         self._blocked_until[ip] = now + block
         self._prune(now)
         return block
-
-    def success(self, ip: str) -> None:
-        self._failures.pop(ip, None)
-        self._strikes.pop(ip, None)
 
     def connection_opened(self, ip: str) -> bool:
         """False — соединение надо отклонить (лимит исчерпан)."""
@@ -122,6 +144,10 @@ class AuthThrottle:
 
 # Пауза после неверного пароля: замедляет перебор даже до блокировки.
 FAIL_DELAY = 1.0
+
+# scrypt берёт ~32 МиБ на проверку: отдельный маленький пул ограничивает память
+# и процессор, сколько бы соединений ни пришло одновременно.
+_HASH_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="share-scrypt")
 
 
 def _local_path(sftp_path: bytes) -> str:
@@ -254,20 +280,23 @@ class _AuthServer(asyncssh.SSHServer):
         return any(user.has_password for user in self._users.values())
 
     async def validate_password(self, username: str, password: str) -> bool:
-        if self._throttle.blocked_for(self._ip):
+        if not self._throttle.begin_attempt(self._ip):
             return False
         user = self._users.get(username)
-        # scrypt считается в отдельном потоке, чтобы не вешать остальные соединения.
-        if user is not None:
-            ok = await asyncio.to_thread(user.check_password, password)
-        else:
-            await asyncio.to_thread(burn_password_check, password)  # то же время, что и для настоящего
-            ok = False
+        loop = asyncio.get_running_loop()
+        ok = False
+        try:
+            # scrypt считается вне цикла событий, чтобы не вешать остальные соединения.
+            if user is not None:
+                ok = await loop.run_in_executor(_HASH_POOL, user.check_password, password)
+            else:  # то же время, что и для настоящего пользователя
+                await loop.run_in_executor(_HASH_POOL, burn_password_check, password)
+        finally:
+            # Оборванная на середине попытка тоже считается неудачей.
+            block = self._throttle.end_attempt(self._ip, ok)
         if ok:
-            self._throttle.success(self._ip)
             self._log(f"Вход по паролю: {username}@{self._peer}", "ok")
             return True
-        block = self._throttle.failure(self._ip)
         self._log(f"Неудачный вход по паролю: {username}@{self._peer}", "warn")
         if block:
             self._log(f"Слишком много неверных паролей: {self._ip} заблокирован на {int(block)} с", "warn")
@@ -334,6 +363,7 @@ class ShareServer:
         if not self._root.is_dir():
             raise ShareError(f"Папка не найдена: {self._root}")
         try:
+            ensure_dummy_hash()  # первая попытка с неизвестным именем не должна быть дольше
             self._host_key = load_or_create()
         except Exception as exc:  # noqa: BLE001
             raise ShareError(str(exc)) from exc
