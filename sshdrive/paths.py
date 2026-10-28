@@ -49,6 +49,11 @@ def keys_dir() -> Path:
     return appdata_dir() / "keys"
 
 
+def agent_dir() -> Path:
+    """Публичные ключи профилей с входом через SSH-агент (секретов тут нет)."""
+    return appdata_dir() / "agent"
+
+
 def profiles_file() -> Path:
     return appdata_dir() / "profiles.json"
 

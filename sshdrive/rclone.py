@@ -377,6 +377,20 @@ def mount(
             )
         else:
             env["RCLONE_CONFIG_SSHDRIVE_KEY_FILE"] = paths.forward_slashes(key_path)
+    elif profile.auth == "agent":
+        if not profile.agent_key:
+            raise RcloneError("В профиле не выбран ключ из SSH-агента")
+        # rclone ищет агента сам (Pageant, затем OpenSSH-агент — как и paramiko).
+        # Если задан key_file, он читает «<key_file>.pub» и запрашивает у агента
+        # только этот ключ. Приватного файла нет: key_file — лишь «имя» для .pub.
+        agent_dir = paths.agent_dir()
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        pub_file = agent_dir / f"{profile.id}.pub"
+        pub_file.write_text(profile.agent_key + "\n", encoding="ascii")
+        env["RCLONE_CONFIG_SSHDRIVE_KEY_USE_AGENT"] = "true"
+        env["RCLONE_CONFIG_SSHDRIVE_KEY_FILE"] = paths.forward_slashes(agent_dir / profile.id)
+        # gpg-agent может показать окно pinentry и ждать PIN.
+        timeout = max(timeout, 120.0)
     else:
         env["RCLONE_CONFIG_SSHDRIVE_PASS"] = obscure(exe, password)
 

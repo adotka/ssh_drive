@@ -345,7 +345,7 @@ class App(tk.Tk):
         connected = bool(profile and profile.id in self.mounts and self.mounts[profile.id].alive)
         self.btn_disconnect.configure(state="normal" if connected else "disabled")
         self.btn_install_key.configure(
-            state="normal" if has and profile.auth == "key" else "disabled"
+            state="normal" if has and profile.auth in ("key", "agent") else "disabled"
         )
         connected_count = sum(1 for m in self.mounts.values() if m.alive)
         self.count_var.set(f"Дисков подключено: {connected_count}")
@@ -418,6 +418,15 @@ class App(tk.Tk):
         """
         password = ""
         passphrase = ""
+
+        if profile.auth == "agent":
+            if not profile.agent_key:
+                if interactive:
+                    messagebox.showerror(
+                        "SSH-агент", "В профиле не выбран ключ. Нажмите «Изменить»."
+                    )
+                return None
+            return password, passphrase  # закрытый ключ остаётся в агенте
 
         if profile.auth == "password":
             if profile.save_secret and profile.password_enc:
@@ -614,6 +623,7 @@ class App(tk.Tk):
                     profile.user,
                     password=password if profile.auth == "password" else None,
                     pkey=pkey,
+                    agent_key=profile.agent_key if profile.auth == "agent" else None,
                     known_hosts=paths.known_hosts_file(),
                     confirm=self.confirm_host_key,
                 )
@@ -747,6 +757,7 @@ class App(tk.Tk):
                 profile.user,
                 password=password if profile.auth == "password" else None,
                 pkey=pkey,
+                agent_key=profile.agent_key if profile.auth == "agent" else None,
                 known_hosts=paths.known_hosts_file(),
                 confirm=self.confirm_host_key,
             )
@@ -760,7 +771,10 @@ class App(tk.Tk):
 
     def _install_key_selected(self) -> None:
         profile = self._selected_profile()
-        if profile is None or profile.auth != "key":
+        if profile is None or profile.auth not in ("key", "agent"):
+            return
+        if profile.auth == "agent":
+            self._install_agent_key(profile)
             return
         key_path = Path(profile.key_path) if profile.key_path else keys.default_key_path()
 
@@ -809,73 +823,97 @@ class App(tk.Tk):
 
         pubkey = keys.public_line(key_path, passphrase)
 
-        def work() -> None:
-            pkey = keys.load(key_path, passphrase)
-            try:
-                info = sshutil.test_login(
-                    profile.host,
-                    profile.port,
-                    profile.user,
-                    pkey=pkey,
-                    known_hosts=paths.known_hosts_file(),
-                    confirm=self.confirm_host_key,
-                )
-                self.log(f"Ключ уже работает: {profile.target} → {info['home']}", "ok")
-                return
-            except sshutil.SSHError as exc:
-                if "отклонил вход" not in str(exc):
-                    raise
-                self.log("Ключ на сервере ещё не установлен — добавляю через вход по паролю…")
-
-            password = stored_password
-            if not password:
-                answer = self.ask_secret_sync(
-                    "Пароль SSH",
-                    f"Пароль {profile.user}@{profile.host} нужен один раз, "
-                    "чтобы добавить ключ на сервер.",
-                    save_allowed=True,
-                    save_default=bool(profile.save_secret),
-                )
-                if answer is None:
-                    self.log("Установка ключа отменена", "warn")
-                    return
-                password, remember = answer
-                if not password:
-                    self.log("Установка ключа отменена: пустой пароль", "warn")
-                    return
-                if remember:
-                    self.ui(self._remember_password, profile, password)
-
-            client = sshutil.connect(
-                profile.host,
-                profile.port,
-                profile.user,
-                password=password,
-                known_hosts=paths.known_hosts_file(),
-                confirm=self.confirm_host_key,
-            )
-            try:
-                result = sshutil.install_public_key(
-                    client, pubkey, confirm_admin=self.confirm_admin_keys
-                )
-            finally:
-                client.close()
-            self.log(f"Сервер: {result}", "ok")
-
-            info = sshutil.test_login(
-                profile.host,
-                profile.port,
-                profile.user,
-                pkey=keys.load(key_path, passphrase),
-                known_hosts=paths.known_hosts_file(),
-                confirm=self.confirm_host_key,
-            )
-            self.log(
-                f"Готово: вход по ключу работает, домашняя папка {info['home']}", "ok"
-            )
-
         self.log(f"Устанавливаю ключ {key_path.name} на {profile.target}…")
-        self.run_bg("Установка ключа", work)
+        self.run_bg(
+            "Установка ключа",
+            lambda: self._install_key_work(
+                profile, pubkey, stored_password,
+                lambda: {"pkey": keys.load(key_path, passphrase)},
+            ),
+        )
+
+    def _install_agent_key(self, profile: Profile) -> None:
+        """Добавляет на сервер публичный ключ, который держит SSH-агент."""
+        if not profile.agent_key:
+            messagebox.showerror("SSH-агент", "В профиле не выбран ключ. Нажмите «Изменить».")
+            return
+        comment = keys.sanitize_comment(profile.agent_comment or f"{profile.user}@{profile.host}")
+        pubkey = f"{profile.agent_key} {comment}".strip()
+        stored_password = ""
+        if profile.save_secret and profile.password_enc:
+            stored_password = try_unprotect(profile.password_enc) or ""
+        self.log(f"Устанавливаю ключ из агента на {profile.target}…")
+        self.run_bg(
+            "Установка ключа",
+            lambda: self._install_key_work(
+                profile, pubkey, stored_password, lambda: {"agent_key": profile.agent_key}
+            ),
+        )
+
+    def _install_key_work(
+        self, profile: Profile, pubkey: str, stored_password: str, login_kwargs
+    ) -> None:
+        """Фоновая часть установки ключа (файловый ключ или ключ из агента).
+
+        login_kwargs() даёт параметры входа по ключу для sshutil.test_login.
+        """
+
+        def login() -> dict:
+            return sshutil.test_login(
+                profile.host,
+                profile.port,
+                profile.user,
+                known_hosts=paths.known_hosts_file(),
+                confirm=self.confirm_host_key,
+                **login_kwargs(),
+            )
+
+        try:
+            info = login()
+            self.log(f"Ключ уже работает: {profile.target} → {info['home']}", "ok")
+            return
+        except sshutil.SSHError as exc:
+            if "отклонил вход" not in str(exc):
+                raise
+            self.log("Ключ на сервере ещё не установлен — добавляю через вход по паролю…")
+
+        password = stored_password
+        if not password:
+            answer = self.ask_secret_sync(
+                "Пароль SSH",
+                f"Пароль {profile.user}@{profile.host} нужен один раз, "
+                "чтобы добавить ключ на сервер.",
+                save_allowed=True,
+                save_default=bool(profile.save_secret),
+            )
+            if answer is None:
+                self.log("Установка ключа отменена", "warn")
+                return
+            password, remember = answer
+            if not password:
+                self.log("Установка ключа отменена: пустой пароль", "warn")
+                return
+            if remember:
+                self.ui(self._remember_password, profile, password)
+
+        client = sshutil.connect(
+            profile.host,
+            profile.port,
+            profile.user,
+            password=password,
+            known_hosts=paths.known_hosts_file(),
+            confirm=self.confirm_host_key,
+        )
+        try:
+            result = sshutil.install_public_key(
+                client, pubkey, confirm_admin=self.confirm_admin_keys
+            )
+        finally:
+            client.close()
+        self.log(f"Сервер: {result}", "ok")
+
+        info = login()
+        self.log(f"Готово: вход по ключу работает, домашняя папка {info['home']}", "ok")
 
     def _remember_password(self, profile: Profile, password: str) -> None:
         profile.password_enc = protect(password)

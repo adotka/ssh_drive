@@ -6,6 +6,7 @@ import base64
 import hashlib
 import re
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -18,6 +19,16 @@ ConfirmAdmin = Callable[[], bool]
 _PUBKEY_RE = re.compile(
     r"(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)) "
     r"[A-Za-z0-9+/]+={0,3}(?: [A-Za-z0-9@._+\-]{1,64})?"
+)
+
+
+# Время на вход через агента: gpg-agent может показать окно pinentry и ждать PIN.
+AGENT_AUTH_TIMEOUT = 120.0
+
+NO_AGENT_MESSAGE = (
+    "SSH-агент не найден или в нём нет ключей. Для gpg4win включите в gpg-agent.conf "
+    "«enable-putty-support» (Pageant) или «enable-win32-openssh-support», перезапустите "
+    "агент (gpgconf --kill gpg-agent) и проверьте, что ключ разрешён в sshcontrol."
 )
 
 
@@ -36,6 +47,68 @@ class AuthCancelled(SSHError):
 def fingerprint(key: paramiko.PKey) -> str:
     digest = hashlib.sha256(key.asbytes()).digest()
     return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
+
+
+@dataclass(frozen=True)
+class AgentIdentity:
+    """Открытая часть ключа, который держит SSH-агент."""
+
+    key_type: str
+    base64: str
+    fingerprint: str
+    comment: str
+
+    @property
+    def line(self) -> str:
+        """«тип base64» — то, что хранится в профиле."""
+        return f"{self.key_type} {self.base64}"
+
+
+def _open_agent() -> tuple[paramiko.Agent, list[paramiko.AgentKey]]:
+    """Подключается к агенту (Pageant, затем OpenSSH-агент) и читает ключи."""
+    try:
+        agent = paramiko.Agent()
+        keys = list(agent.get_keys())
+    except (paramiko.SSHException, OSError) as exc:
+        raise SSHError(f"Не удалось обратиться к SSH-агенту: {exc}") from exc
+    if not keys:
+        agent.close()
+        raise SSHError(NO_AGENT_MESSAGE)
+    return agent, keys
+
+
+def list_agent_keys() -> list[AgentIdentity]:
+    """Ключи, доступные в SSH-агенте (только типы, которые умеет программа)."""
+    agent, keys = _open_agent()
+    try:
+        result = []
+        for key in keys:
+            line = f"{key.get_name()} {key.get_base64()}"
+            if not _PUBKEY_RE.fullmatch(line):
+                continue
+            comment = "".join(ch for ch in (key.comment or "") if ch.isprintable())[:80]
+            result.append(AgentIdentity(key.get_name(), key.get_base64(), fingerprint(key), comment))
+        return result
+    finally:
+        agent.close()
+
+
+def _agent_pkey(agent_key: str) -> tuple[paramiko.Agent, paramiko.AgentKey]:
+    """Ключ из агента, точно совпадающий с выбранным в профиле.
+
+    Другие ключи агента не предлагаются серверу: иначе вход мог бы пройти под
+    не тем ключом или исчерпать лимит попыток (MaxAuthTries).
+    """
+    agent, keys = _open_agent()
+    wanted = agent_key.split()[-1]
+    for key in keys:
+        if key.get_base64() == wanted:
+            return agent, key
+    agent.close()
+    raise SSHError(
+        "Выбранного ключа нет в SSH-агенте (возможно, смарт-карта не вставлена "
+        "или ключ удалён). Выберите ключ заново в профиле."
+    )
 
 
 def _hostkey_name(host: str, port: int) -> str:
@@ -91,11 +164,15 @@ def connect(
     *,
     password: str | None = None,
     pkey: paramiko.PKey | None = None,
+    agent_key: str | None = None,
     known_hosts: Path | str | None = None,
     confirm: ConfirmHostKey | None = None,
     timeout: float = 20.0,
 ) -> paramiko.SSHClient:
-    """Подключается по SSH, проверяя ключ хоста через known_hosts."""
+    """Подключается по SSH, проверяя ключ хоста через known_hosts.
+
+    agent_key — «тип base64» ключа из SSH-агента; тогда пароль и pkey не нужны.
+    """
     client = paramiko.SSHClient()
     known_path = Path(known_hosts) if known_hosts else None
     try:
@@ -106,6 +183,17 @@ def connect(
         raise SSHError(f"Не удалось прочитать {known_path}: {exc}") from exc
     client.set_missing_host_key_policy(_TOFUPolicy(known_path, confirm))
 
+    agent = None
+    auth_timeout = timeout
+    if agent_key:
+        try:
+            agent, pkey = _agent_pkey(agent_key)
+        except BaseException:
+            client.close()
+            raise
+        password = None
+        auth_timeout = max(timeout, AGENT_AUTH_TIMEOUT)
+
     try:
         client.connect(
             hostname=host,
@@ -115,7 +203,7 @@ def connect(
             pkey=pkey,
             timeout=timeout,
             banner_timeout=timeout,
-            auth_timeout=timeout,
+            auth_timeout=auth_timeout,
             look_for_keys=False,
             allow_agent=False,
         )
@@ -141,6 +229,10 @@ def connect(
     except Exception:
         client.close()
         raise
+    finally:
+        # Подпись нужна только во время входа; дальше агент не используется.
+        if agent is not None:
+            agent.close()
 
     # Запоминаем именно тот ключ, который реально использовался, и убираем
     # устаревшие записи других типов — иначе rclone (Go known_hosts) ругается
@@ -288,12 +380,14 @@ def test_login(
     *,
     password: str | None = None,
     pkey: paramiko.PKey | None = None,
+    agent_key: str | None = None,
     known_hosts: Path | str | None = None,
     confirm: ConfirmHostKey | None = None,
 ) -> dict[str, object]:
     """Проверяет вход и возвращает сведения о сервере и ключе хоста."""
     client = connect(
-        host, port, user, password=password, pkey=pkey, known_hosts=known_hosts, confirm=confirm
+        host, port, user, password=password, pkey=pkey, agent_key=agent_key,
+        known_hosts=known_hosts, confirm=confirm,
     )
     try:
         transport = client.get_transport()
