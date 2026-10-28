@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Установщик SSH Drive (MSI, per-user — без UAC).
+
+  Собирается build_exe.bat:
+    candle -arch x64 -dAppVersion=1.0.0 installer\sshdrive.wxs
+    light -ext WixUIExtension -b <корень проекта> ...
+
+  Ставится в %LOCALAPPDATA%\Programs\SSH Drive, создаёт ярлыки в меню «Пуск»
+  и на рабочем столе, кладёт рядом rclone.exe и установщик WinFsp.
+  Строки MSI — латиницей (codepage 1252), интерфейс установщика английский.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+
+  <?ifndef var.AppVersion ?>
+    <?define AppVersion = "1.0.0" ?>
+  <?endif?>
+
+  <Product Id="*"
+           Name="SSH Drive"
+           Language="1033"
+           Version="$(var.AppVersion)"
+           Manufacturer="jjm-github"
+           UpgradeCode="79BD088C-48F7-4214-80F2-BE470A6A5099">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perUser"
+             Platform="x64"
+             Description="SSH folder as a Windows drive"
+             Comments="https://github.com/jjm-github/ssh_drive" />
+
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of SSH Drive is already installed." />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="AppIcon" SourceFile="build\sshdrive.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/jjm-github/ssh_drive" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/jjm-github/ssh_drive#readme" />
+
+    <!-- Окно выбора папки установки -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <UIRef Id="WixUI_InstallDir" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+
+      <!-- %LOCALAPPDATA%\Programs\SSH Drive -->
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="ProgramsFolder" Name="Programs">
+          <Directory Id="INSTALLFOLDER" Name="SSH Drive">
+
+            <Component Id="MainApplication" Guid="7D249C0F-1F0C-460B-86BB-0BFA9FD27F9B">
+              <File Id="SSHDriveExe" Source="build\out\SSHDrive.exe" />
+              <RegistryValue Root="HKCU"
+                             Key="Software\jjm-github\SSHDrive"
+                             Name="MainExe"
+                             Type="integer"
+                             Value="1"
+                             KeyPath="yes" />
+              <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+            </Component>
+
+            <!-- Движок монтирования: программа берёт его из своей папки -->
+            <Component Id="Rclone" Guid="8CD1DDFC-3957-4C57-A37E-FF6919D2FA89">
+              <File Id="RcloneExe" Source="build\rclone.exe" />
+              <RegistryValue Root="HKCU"
+                             Key="Software\jjm-github\SSHDrive"
+                             Name="Rclone"
+                             Type="integer"
+                             Value="1"
+                             KeyPath="yes" />
+            </Component>
+
+            <!-- Установщик драйвера: приложение предложит его, если WinFsp нет -->
+            <Component Id="WinFspInstaller" Guid="2BFEA231-2651-438B-AD3C-8EB4F16F2DBC">
+              <File Id="WinFspMsi" Source="build\winfsp.msi" />
+              <RegistryValue Root="HKCU"
+                             Key="Software\jjm-github\SSHDrive"
+                             Name="WinFspMsi"
+                             Type="integer"
+                             Value="1"
+                             KeyPath="yes" />
+            </Component>
+
+            <Component Id="Documentation" Guid="2E41F5DE-54FD-462D-B8E9-5F04B2F39E2F">
+              <File Id="ReadmeFile" Source="README.md" />
+              <RegistryValue Root="HKCU"
+                             Key="Software\jjm-github\SSHDrive"
+                             Name="Readme"
+                             Type="integer"
+                             Value="1"
+                             KeyPath="yes" />
+            </Component>
+
+          </Directory>
+        </Directory>
+      </Directory>
+
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ProgramMenuDir" Name="SSH Drive" />
+      </Directory>
+
+      <Directory Id="DesktopFolder" />
+      <Directory Id="StartupFolder" />
+    </Directory>
+
+    <!-- Пустая папка %LOCALAPPDATA%\Programs убирается при удалении -->
+    <Component Id="ProgramsFolderCleanup" Directory="ProgramsFolder" Guid="47B5122A-D585-48DF-941B-CAC51A527136">
+      <RemoveFolder Id="RemoveProgramsFolder" On="uninstall" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\jjm-github\SSHDrive"
+                     Name="ProgramsFolder"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- Ярлык в меню «Пуск» -->
+    <Component Id="StartMenuShortcut" Directory="ProgramMenuDir" Guid="8D58660E-290E-468D-AA84-95499B8132FE">
+      <Shortcut Id="StartMenuLink"
+                Name="SSH Drive"
+                Description="SSH folder as a Windows drive"
+                Target="[INSTALLFOLDER]SSHDrive.exe"
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="AppIcon"
+                IconIndex="0"
+                Advertise="no" />
+      <RemoveFolder Id="RemoveProgramMenuDir" On="uninstall" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\jjm-github\SSHDrive"
+                     Name="StartMenuShortcut"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- Ярлык на рабочем столе -->
+    <Component Id="DesktopShortcut" Directory="DesktopFolder" Guid="80C44787-95D8-4954-ACD9-2B572B99FCC8">
+      <Shortcut Id="DesktopLink"
+                Name="SSH Drive"
+                Description="SSH folder as a Windows drive"
+                Target="[INSTALLFOLDER]SSHDrive.exe"
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="AppIcon"
+                IconIndex="0"
+                Advertise="no" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\jjm-github\SSHDrive"
+                     Name="DesktopShortcut"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- Автозапуск при входе в Windows (свёрнуто в трей) -->
+    <Component Id="StartupShortcut" Directory="StartupFolder" Guid="B7B1B4A2-792E-4C9E-86F7-1266590BFAFC">
+      <Shortcut Id="StartupLink"
+                Name="SSH Drive"
+                Description="SSH folder as a Windows drive"
+                Target="[INSTALLFOLDER]SSHDrive.exe"
+                Arguments="--tray"
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="AppIcon"
+                IconIndex="0"
+                Advertise="no" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\jjm-github\SSHDrive"
+                     Name="StartupShortcut"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+    <Feature Id="Complete" Title="SSH Drive" Level="1">
+      <ComponentRef Id="MainApplication" />
+      <ComponentRef Id="Rclone" />
+      <ComponentRef Id="WinFspInstaller" />
+      <ComponentRef Id="Documentation" />
+      <ComponentRef Id="ProgramsFolderCleanup" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+      <ComponentRef Id="StartupShortcut" />
+    </Feature>
+
+  </Product>
+</Wix>

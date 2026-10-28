@@ -62,6 +62,10 @@ def find_exe() -> str | None:
     override = os.environ.get("SSHDRIVE_RCLONE")
     if override and Path(override).is_file():
         return str(Path(override))
+    # rclone, установленный вместе с программой (MSI) или лежащий рядом с exe
+    beside_exe = paths.install_dir() / "rclone.exe"
+    if beside_exe.is_file():
+        return str(beside_exe)
     local = paths.rclone_exe()
     if local.is_file():
         return str(local)

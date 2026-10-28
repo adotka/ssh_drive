@@ -161,7 +161,7 @@ def download(progress: Progress | None = None, log: Log | None = None) -> Path:
     приватный каталог. Каталог скачивания удаляет cleanup_download(): встроенные
     файлы и всё остальное он не трогает.
     """
-    bundled = paths.bundled_glob("winfsp-*.msi")
+    bundled = paths.bundled_glob("winfsp*.msi")
     if bundled:
         if log:
             log(f"Использую встроенный установщик {bundled[0].name}")

@@ -4,3 +4,4 @@ cryptography==50.0.2
 pycparser==3.11
 pystray>=0.19
 pillow>=10,<13
+asyncssh>=2.14
