@@ -16,6 +16,7 @@ from . import keys, paths, rclone, sshutil, winfsp
 from .dialogs import KnownHostsDialog, ProfileDialog, ask_secret
 from .profiles import Profile, ProfileStore
 from .secretstore import protect, try_unprotect
+from .tray import TrayIcon, make_icon_image
 
 LEVEL_COLORS = {
     "info": "#202020",
@@ -39,11 +40,16 @@ class App(tk.Tk):
         self._log_lock = threading.Lock()
         self._asked_rclone = False
         self._asked_winfsp = False
+        self._quitting = False
+        self._tray_hint_shown = False
+        self.tray: TrayIcon | None = None
+        self.tray_ok = False
 
         self.title("SSH Drive — SSH-папка как диск Windows")
         self.geometry("1020x660")
         self.minsize(880, 560)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._set_window_icon()
 
         self.style = ttk.Style(self)
         for theme in ("vista", "winnative", "clam"):
@@ -56,9 +62,60 @@ class App(tk.Tk):
         self._build_menu()
         self._build_ui()
         self._refresh_tree()
-        self.after(100, self._drain)
+        self._drain_id = self.after(100, self._drain)
         self.log(f"Данные приложения: {paths.appdata_dir()}")
+        self.after(200, self._init_tray)
         self.after(250, self._startup_checks)
+
+    # ------------------------------------------------------------------
+    # Иконка в трее
+    # ------------------------------------------------------------------
+    def _set_window_icon(self) -> None:
+        try:
+            from PIL import ImageTk
+
+            self._icon_photo = ImageTk.PhotoImage(make_icon_image(64))
+            self.iconphoto(True, self._icon_photo)
+        except Exception:  # noqa: BLE001 - иконка не критична
+            self._icon_photo = None
+
+    def _init_tray(self) -> None:
+        if self.smoke or os.environ.get("SSHDRIVE_NO_TRAY") == "1":
+            return
+        tray = TrayIcon(
+            on_open=lambda: self.ui(self._restore_window),
+            on_disconnect_all=lambda: self.ui(self._disconnect_all),
+            on_quit=lambda: self.ui(self._quit),
+        )
+        if not tray.available:
+            self.log(f"Иконка в трее недоступна: {tray.error}", "warn")
+            return
+        self.tray = tray
+        self.tray_ok = tray.start()
+        if self.tray_ok:
+            self.tray.set_tooltip("SSH Drive — дисков: 0")
+            self.log("Иконка в трее активна: закрытие окна сворачивает программу", "dim")
+        else:
+            self.log(f"Не удалось показать иконку в трее: {tray.error or 'неизвестная ошибка'}", "warn")
+
+    def hide_to_tray(self) -> None:
+        if not self.tray_ok:
+            self._quit()
+            return
+        self.withdraw()
+        if not self._tray_hint_shown:
+            self._tray_hint_shown = True
+            if self.tray is not None:
+                self.tray.notify("Программа свёрнута в трей. Диски остаются подключёнными.")
+        self.log("Окно свёрнуто в трей (двойной клик по иконке — открыть)", "dim")
+
+    def _restore_window(self) -> None:
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------------
     # Логирование и обмен с фоновыми потоками
@@ -104,7 +161,7 @@ class App(tk.Tk):
                         self._append_log(traceback.format_exc(), "err")
         except queue.Empty:
             pass
-        self.after(100, self._drain)
+        self._drain_id = self.after(100, self._drain)
 
     def _append_log(self, text: str, level: str) -> None:
         self.log_text.configure(state="normal")
@@ -126,7 +183,8 @@ class App(tk.Tk):
         file_menu = tk.Menu(menu, tearoff=False)
         file_menu.add_command(label="Обновить список", command=self._refresh_tree)
         file_menu.add_separator()
-        file_menu.add_command(label="Выход", command=self._on_close)
+        file_menu.add_command(label="Свернуть в трей", command=self.hide_to_tray)
+        file_menu.add_command(label="Выход", command=self._quit)
         menu.add_cascade(label="Файл", menu=file_menu)
 
         tools = tk.Menu(menu, tearoff=False)
@@ -285,7 +343,10 @@ class App(tk.Tk):
         self.btn_install_key.configure(
             state="normal" if has and profile.auth == "key" else "disabled"
         )
-        self.count_var.set(f"Дисков подключено: {sum(1 for m in self.mounts.values() if m.alive)}")
+        connected_count = sum(1 for m in self.mounts.values() if m.alive)
+        self.count_var.set(f"Дисков подключено: {connected_count}")
+        if self.tray_ok and self.tray is not None:
+            self.tray.set_tooltip(f"SSH Drive — дисков: {connected_count}")
 
     # ------------------------------------------------------------------
     # Профили
@@ -541,6 +602,9 @@ class App(tk.Tk):
         profile = self._selected_profile()
         if profile is None:
             return
+        self._disconnect_profile(profile)
+
+    def _disconnect_profile(self, profile: Profile) -> None:
         handle = self.mounts.get(profile.id)
         if handle is None:
             return
@@ -555,6 +619,20 @@ class App(tk.Tk):
             self.log(f"Диск {handle.drive}: отключён", "ok")
 
         self.run_bg("Отключение", work)
+
+    def _disconnect_all(self) -> None:
+        active = [
+            self.store.get(profile_id)
+            for profile_id, handle in list(self.mounts.items())
+            if handle.alive
+        ]
+        active = [profile for profile in active if profile is not None]
+        if not active:
+            self.log("Нет подключённых дисков", "dim")
+            return
+        self._restore_window()
+        for profile in active:
+            self._disconnect_profile(profile)
 
     # ------------------------------------------------------------------
     # Проверка входа и установка ключа
@@ -845,9 +923,10 @@ class App(tk.Tk):
     def _about(self) -> None:
         messagebox.showinfo(
             "SSH Drive",
-            "SSH Drive 1.0\n\n"
+            "SSH Drive 1.1\n\n"
             "Монтирует папку SSH-сервера как диск Windows.\n"
             "Движок: rclone + WinFsp, интерфейс: tkinter.\n"
+            "Закрытие окна сворачивает программу в трей; выход — через меню иконки.\n"
             "Пароли хранятся в profiles.json в зашифрованном виде (DPAPI).",
         )
 
@@ -855,7 +934,20 @@ class App(tk.Tk):
     # Завершение
     # ------------------------------------------------------------------
     def _on_close(self) -> None:
+        """Крестик окна: свернуть в трей — диски продолжают работать."""
+        if self._quitting:
+            return
+        if self.smoke or not self.tray_ok:
+            self._quit()
+            return
+        self.hide_to_tray()
+
+    def _quit(self) -> None:
+        """Настоящий выход: отключить диски, убрать иконку и закрыть программу."""
+        if self._quitting:
+            return
         if self.pending:
+            self._restore_window()
             messagebox.showinfo(
                 "Выход",
                 "Идёт подключение. Дождитесь его завершения (обычно несколько секунд).",
@@ -863,6 +955,7 @@ class App(tk.Tk):
             return
         active = [h for h in self.mounts.values() if h.alive]
         if active:
+            self._restore_window()
             if not messagebox.askyesno(
                 "Выход", f"Активных дисков: {len(active)}. Отключить их и выйти?"
             ):
@@ -872,6 +965,15 @@ class App(tk.Tk):
                     handle.stop(timeout=6)
                 except Exception as exc:  # noqa: BLE001
                     self.log(f"Не удалось отключить {handle.drive}: {exc}", "warn")
+        self._quitting = True
+        if self._drain_id is not None:
+            try:
+                self.after_cancel(self._drain_id)
+            except tk.TclError:
+                pass
+            self._drain_id = None
+        if self.tray is not None:
+            self.tray.stop()
         self.destroy()
 
 
@@ -909,7 +1011,13 @@ def main(argv: list[str] | None = None) -> int:
     if not smoke and not _acquire_single_instance():
         root = tk.Tk()
         root.withdraw()
-        messagebox.showinfo("SSH Drive", "SSH Drive уже запущен.", parent=root)
+        messagebox.showinfo(
+            "SSH Drive",
+            "SSH Drive уже запущен.\n\n"
+            "Окно могло быть свёрнуто в трей — посмотрите иконку рядом с часами "
+            "(двойной клик открывает окно).",
+            parent=root,
+        )
         root.destroy()
         return 0
     app = App(smoke=smoke)

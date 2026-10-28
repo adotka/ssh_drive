@@ -27,7 +27,7 @@ if not exist "%PY%" (
     if errorlevel 1 goto :error
 )
 
-"%PY%" -c "import paramiko, cryptography" >nul 2>&1
+"%PY%" -c "import paramiko, cryptography, pystray, PIL" >nul 2>&1
 if errorlevel 1 (
     echo [2/3] Устанавливаю зависимости...
     "%PY%" -m pip install --disable-pip-version-check -r "%~dp0requirements.txt"

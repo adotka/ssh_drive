@@ -1,2 +1,4 @@
 paramiko>=3.4
 cryptography>=42
+pystray>=0.19
+pillow>=10
