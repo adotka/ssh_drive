@@ -170,6 +170,24 @@ class WinfspTests(TempEnv):
         self.assertLess(elevated.index("Get-AuthenticodeSignature"), elevated.index("msiexec.exe"))
         for name in winfsp.EXPECTED_SIGNERS:
             self.assertIn(f"'{name}'", elevated)
+        self.assertIn("OrdinalIgnoreCase", elevated)
+        self.assertNotIn(".Contains(", elevated)  # регистрозависимо: Subject = «NAVIMATICS LLC»
+
+    def test_precheck_script_matches_signer_case_insensitively(self) -> None:
+        seen = {}
+
+        def fake_run(args, **kw):
+            seen["script"] = base64.b64decode(args[args.index("-EncodedCommand") + 1]).decode("utf-16-le")
+            return subprocess.CompletedProcess(args, 0, stdout="OK CN=NAVIMATICS LLC\n", stderr="")
+
+        with mock.patch.object(subprocess, "run", fake_run):
+            winfsp._check_signature(Path("x.msi"), None)
+        self.assertIn("OrdinalIgnoreCase", seen["script"])
+        self.assertNotIn(".Contains(", seen["script"])
+
+    def test_expected_signer_matches_real_subject(self) -> None:
+        subject = "CN=NAVIMATICS LLC, O=NAVIMATICS LLC, L=KIRKLAND, S=Washington, C=US"
+        self.assertTrue(any(n.lower() in subject.lower() for n in winfsp.EXPECTED_SIGNERS))
 
 
 class BundledMsiTests(TempEnv):

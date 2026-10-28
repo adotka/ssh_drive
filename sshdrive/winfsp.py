@@ -27,9 +27,10 @@ GITHUB_LATEST = "https://api.github.com/repos/winfsp/winfsp/releases/latest"
 USER_AGENT = "SSHDrive/1.0"
 RELEASE_PREFIX = "https://github.com/winfsp/winfsp/releases/download/"
 # MSI должен быть подписан действительной подписью Authenticode И одним из этих
-# издателей (подстрока в Subject сертификата). Подпись «кого угодно» не годится.
-# Если WinFsp сменит сертификат, поправьте кортеж.
-EXPECTED_SIGNERS = ("Navimatics", "Zissimopoulos")
+# издателей (подстрока в Subject сертификата, регистр не важен: в сертификате
+# «CN=NAVIMATICS LLC»). Подпись «кого угодно» не годится. Значение сверено с
+# реальным MSI; если WinFsp сменит сертификат, поправьте кортеж.
+EXPECTED_SIGNERS = ("Navimatics LLC",)
 EXIT_BAD_SIGNATURE = 10
 EXIT_BAD_SIGNER = 11
 EXIT_PREPARE_FAILED = 12
@@ -220,7 +221,7 @@ $s = Get-AuthenticodeSignature -LiteralPath {_ps_quote(str(msi))}
 if ($s.Status -ne 'Valid') {{ Write-Output ('BAD status ' + $s.Status); exit {EXIT_BAD_SIGNATURE} }}
 $subject = $s.SignerCertificate.Subject
 $match = $false
-foreach ($n in {_signers_literal()}) {{ if ($subject.Contains($n)) {{ $match = $true }} }}
+foreach ($n in {_signers_literal()}) {{ if ($subject.IndexOf($n, [StringComparison]::OrdinalIgnoreCase) -ge 0) {{ $match = $true }} }}
 if (-not $match) {{ Write-Output ('BAD signer ' + $subject); exit {EXIT_BAD_SIGNER} }}
 Write-Output ('OK ' + $subject)
 """
@@ -266,7 +267,7 @@ try {{
     $s = Get-AuthenticodeSignature -LiteralPath $copy
     $match = $false
     if ($s.Status -eq 'Valid') {{
-        foreach ($n in {_signers_literal()}) {{ if ($s.SignerCertificate.Subject.Contains($n)) {{ $match = $true }} }}
+        foreach ($n in {_signers_literal()}) {{ if ($s.SignerCertificate.Subject.IndexOf($n, [StringComparison]::OrdinalIgnoreCase) -ge 0) {{ $match = $true }} }}
     }}
     if ($s.Status -ne 'Valid') {{ $code = {EXIT_BAD_SIGNATURE} }}
     elseif (-not $match) {{ $code = {EXIT_BAD_SIGNER} }}
