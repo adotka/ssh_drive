@@ -30,27 +30,27 @@ set "VENV=%~dp0.venv-build"
 set "BPY=%VENV%\Scripts\python.exe"
 
 if not exist "%BPY%" (
-    echo [1/6] Создаю окружение сборки...
+    echo [1/7] Создаю окружение сборки...
     %BASEPY% -m venv "%VENV%"
     if errorlevel 1 goto :error
 )
 
-echo [2/6] Устанавливаю зависимости...
+echo [2/7] Устанавливаю зависимости...
 "%BPY%" -m pip install --disable-pip-version-check -q --upgrade pip
 "%BPY%" -m pip install --disable-pip-version-check -q -r requirements.txt pyinstaller
 if errorlevel 1 goto :error
 
-echo [3/6] Рисую иконку...
+echo [3/7] Рисую иконку...
 "%BPY%" tools\make_icon.py
 if errorlevel 1 goto :error
 
-echo [4/6] Собираю обычный exe...
+echo [4/7] Собираю обычный exe...
 set "SSHDRIVE_BUNDLE_TOOLS="
 set "SSHDRIVE_EXE_NAME=SSHDrive"
 "%BPY%" -m PyInstaller --noconfirm --distpath build\out --workpath build\pyi-light sshdrive.spec
 if errorlevel 1 goto :error
 
-echo [5/6] Скачиваю rclone/WinFsp и собираю offline-exe...
+echo [5/7] Скачиваю rclone/WinFsp и собираю offline-exe...
 set "SSHDRIVE_BUNDLE_TOOLS=1"
 set "SSHDRIVE_EXE_NAME=SSHDrive-offline"
 "%BPY%" tools\fetch_tools.py
@@ -62,7 +62,11 @@ if errorlevel 1 (
 "%BPY%" -m PyInstaller --noconfirm --distpath build\out --workpath build\pyi-offline sshdrive.spec
 if errorlevel 1 goto :error
 
-echo [6/6] Собираю MSI-установщик...
+echo [6/7] Собираю SSHShare.exe...
+%BPY% -m PyInstaller --noconfirm --distpath build\out --workpath build\pyi-share sshshare.spec
+if errorlevel 1 goto :error
+
+echo [7/7] Собираю MSI-установщик...
 "%BPY%" tools\fetch_wix.py
 if errorlevel 1 goto :error
 if not exist "build\winfsp.msi" (
@@ -81,6 +85,7 @@ echo.
 echo Копирую exe в dist...
 copy /y "build\out\SSHDrive.exe" "dist\SSHDrive.exe" >nul || echo   ВНИМАНИЕ: dist\SSHDrive.exe занят запущенной программой — закройте её и скопируйте файл вручную.
 copy /y "build\out\SSHDrive-offline.exe" "dist\SSHDrive-offline.exe" >nul
+copy /y "build\out\SSHShare.exe" "dist\SSHShare.exe" >nul
 echo.
 echo Готово. Файлы:
 dir /b dist\*.exe dist\*.msi 2>nul

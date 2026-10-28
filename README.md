@@ -51,6 +51,7 @@ Windows Explorer  →  Z:  →  rclone (SFTP)  →  ваш SSH-сервер
 | `SSHDrive-1.0.0-x64.msi` | ~46 МБ | установщик: меню «Пуск», ярлык на рабочем столе, автозапуск, внутри rclone и MSI WinFsp |
 | `SSHDrive.exe` | ~24 МБ | портативный: rclone и WinFsp скачиваются при первом запуске |
 | `SSHDrive-offline.exe` | ~53 МБ | портативный offline: rclone.exe и установщик WinFsp внутри |
+| `SSHShare.exe` | ~25 МБ | SSH Share — раздать папку по SSH (см. ниже), портативный |
 
 * Установщик ставит программу **для текущего пользователя** (без UAC) и
   регистрируется в «Параметры → Приложения». Удаление убирает ярлыки,
@@ -71,6 +72,37 @@ build_exe.bat
 
 Нужен Python 3.10+ (лучше 3.13) и интернет на время сборки. Скрипт создаёт
 `.venv-build`, `build/` и `dist/`.
+
+---
+
+## SSH Share — раздать папку по SSH
+
+Вторая программа проекта: отдаёт выбранную папку по SSH/SFTP, чтобы с другой
+машины её можно было подключить как диск (через SSH Drive) или скачать любым
+SFTP-клиентом.
+
+Запуск: `run_share.bat` (из исходников) или `dist\SSHShare.exe` (Python не нужен).
+
+1. Выберите папку и порт (по умолчанию 2222).
+2. Интерфейс: «Все интерфейсы» (для локалки) или «Только этот компьютер».
+3. Добавьте пользователей: пароль и/или публичный ключ, при желании — «только чтение».
+4. **Запустить сервер**. В окне появятся адрес, отпечаток ключа сервера и список пользователей.
+
+Что важно знать:
+
+* папка заперта (chroot): выйти за её пределы нельзя, симлинки/ junctions
+  наружу блокируются;
+* пароли хранятся через DPAPI, ключи — только публичные;
+* сервер живёт, пока открыта программа; закрытие окна останавливает его;
+* при первом подключении клиент покажет отпечаток ключа — сверьте его с тем,
+  что в окне SSH Share;
+* если клиент не подключается — разрешите порт в брандмауэре Windows; не
+  выставляйте сервер в интернет без необходимости (ограничения попыток входа нет);
+* данные: `%APPDATA%\SSHShare`, журнал: `%LOCALAPPDATA%\SSHShare\logs`.
+
+Подключение через SSH Drive: добавьте профиль с IP этого компьютера, портом и
+пользователем SSH Share. Для входа по ключу добавьте публичный ключ клиента в
+списке ключей пользователя SSH Share.
 
 ---
 
@@ -246,13 +278,16 @@ python -m venv .venv
 Структура проекта:
 
 ```
-run.bat              запуск из исходников (venv + зависимости)
-run_app.py           точка входа для PyInstaller
-build_exe.bat        сборка dist\SSHDrive.exe и SSHDrive-offline.exe
-sshdrive.spec        спецификация PyInstaller
+run.bat              запуск SSH Drive из исходников (venv + зависимости)
+run_share.bat        запуск SSH Share из исходников
+run_app.py           точка входа SSH Drive для PyInstaller
+run_share.py         точка входа SSH Share для PyInstaller
+build_exe.bat        сборка exe: SSHDrive, SSHDrive-offline, SSHShare + MSI
+sshdrive.spec        спецификация PyInstaller (SSH Drive)
+sshshare.spec        спецификация PyInstaller (SSH Share)
 installer/           исходник MSI (WiX)
-tools/               иконка, WiX, rclone/WinFsp для offline-сборки
-requirements.txt     paramiko, cryptography, pystray, pillow
+tools/               иконки, WiX, rclone/WinFsp для offline-сборки
+requirements.txt     paramiko, cryptography, pystray, pillow, asyncssh
 sshdrive/app.py      окно, профили, подключение
 sshdrive/tray.py     иконка в трее (pystray)
 sshdrive/autostart.py  ярлык в «Автозагрузке»
@@ -263,6 +298,7 @@ sshdrive/keys.py     генерация ключей ed25519
 sshdrive/profiles.py профили, автоподключение
 sshdrive/winfsp.py   проверка и установка WinFsp
 sshdrive/secretstore.py  DPAPI-шифрование паролей
+ssh_share/           SSH Share: сервер, пользователи, GUI
 ```
 
 ---
@@ -285,3 +321,12 @@ sshdrive/secretstore.py  DPAPI-шифрование паролей
 2. Закройте её и удалите папки `%APPDATA%\SSHDrive`, `%LOCALAPPDATA%\SSHDrive`
    и каталог проекта вместе с `.venv`.
 3. WinFsp (если больше не нужен) удаляется через «Параметры → Приложения».
+
+---
+
+## Контакты
+
+Связь с автором: **[reala@bk.ru](mailto:reala@bk.ru)**
+
+Ошибки и предложения — через [Issues](https://github.com/jjm-github/ssh_drive/issues).
+
