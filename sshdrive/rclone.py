@@ -49,6 +49,10 @@ def find_exe() -> str | None:
     local = paths.rclone_exe()
     if local.is_file():
         return str(local)
+    # rclone, встроенный в offline-сборку exe (его SHA256 сверен при сборке)
+    bundled = paths.bundled_file("rclone.exe")
+    if bundled is not None:
+        return str(bundled)
     return _which_safe()
 
 

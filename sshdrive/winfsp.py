@@ -154,10 +154,19 @@ def _signers_literal() -> str:
 
 
 def download(progress: Progress | None = None, log: Log | None = None) -> Path:
-    """Скачивает MSI в новый приватный каталог и проверяет подпись.
+    """Возвращает путь к MSI с проверенной подписью.
 
-    Каталог (родитель возвращённого файла) вызывающий удаляет сам.
+    Берётся MSI, встроенный в offline-сборку, иначе скачивается в новый
+    приватный каталог. Каталог скачивания удаляет cleanup_download(): встроенные
+    файлы и всё остальное он не трогает.
     """
+    bundled = paths.bundled_glob("winfsp-*.msi")
+    if bundled:
+        if log:
+            log(f"Использую встроенный установщик {bundled[0].name}")
+        _check_signature(bundled[0], log)
+        return bundled[0]
+
     name, url = latest_msi()
     if not name.lower().endswith(".msi"):
         raise RuntimeError(f"Неожиданное имя установщика WinFsp: {name[:80]}")
@@ -183,6 +192,20 @@ def download(progress: Progress | None = None, log: Log | None = None) -> Path:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
     return target
+
+
+def cleanup_download(msi: Path) -> None:
+    """Удаляет каталог, который создал download(); чужие каталоги не трогает."""
+    parent = msi.parent
+    try:
+        ours = (
+            parent.name.startswith("sshdrive-winfsp-")
+            and parent.parent.resolve() == Path(tempfile.gettempdir()).resolve()
+        )
+    except OSError:
+        return
+    if ours:
+        shutil.rmtree(parent, ignore_errors=True)
 
 
 def _check_signature(msi: Path, log: Log | None) -> None:
@@ -273,7 +296,7 @@ exit $code
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     finally:
-        shutil.rmtree(msi.parent, ignore_errors=True)
+        cleanup_download(msi)
 
     code = result.returncode
     if code == EXIT_BAD_SIGNATURE:

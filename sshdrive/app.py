@@ -16,6 +16,7 @@ from . import keys, paths, rclone, sshutil, winfsp
 from .dialogs import KnownHostsDialog, ProfileDialog, ask_secret
 from .profiles import Profile, ProfileStore
 from .secretstore import protect, try_unprotect
+from .tray import TrayIcon, make_icon_image
 
 LEVEL_COLORS = {
     "info": "#202020",
@@ -35,15 +36,24 @@ class App(tk.Tk):
         self.mounts: dict[str, rclone.MountHandle] = {}
         self.states: dict[str, str] = {}
         self.pending: set[str] = set()
+        self.pending_drives: dict[str, str] = {}
+        self.reserved: set[str] = set()
+        self._autoconnect_done = False
+        self._autoconnect_pending = False
         self._queue: queue.Queue = queue.Queue()
         self._log_lock = threading.Lock()
         self._asked_rclone = False
         self._asked_winfsp = False
+        self._quitting = False
+        self._tray_hint_shown = False
+        self.tray: TrayIcon | None = None
+        self.tray_ok = False
 
         self.title("SSH Drive — SSH-папка как диск Windows")
         self.geometry("1020x660")
         self.minsize(880, 560)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._set_window_icon()
 
         self.style = ttk.Style(self)
         for theme in ("vista", "winnative", "clam"):
@@ -56,9 +66,60 @@ class App(tk.Tk):
         self._build_menu()
         self._build_ui()
         self._refresh_tree()
-        self.after(100, self._drain)
+        self._drain_id = self.after(100, self._drain)
         self.log(f"Данные приложения: {paths.appdata_dir()}")
-        self.after(250, self._startup_checks)
+        self.after(200, self._init_tray)
+        self.after(250, lambda: self._startup_checks(auto=True))
+
+    # ------------------------------------------------------------------
+    # Иконка в трее
+    # ------------------------------------------------------------------
+    def _set_window_icon(self) -> None:
+        try:
+            from PIL import ImageTk
+
+            self._icon_photo = ImageTk.PhotoImage(make_icon_image(64))
+            self.iconphoto(True, self._icon_photo)
+        except Exception:  # noqa: BLE001 - иконка не критична
+            self._icon_photo = None
+
+    def _init_tray(self) -> None:
+        if self.smoke or os.environ.get("SSHDRIVE_NO_TRAY") == "1":
+            return
+        tray = TrayIcon(
+            on_open=lambda: self.ui(self._restore_window),
+            on_disconnect_all=lambda: self.ui(self._disconnect_all),
+            on_quit=lambda: self.ui(self._quit),
+        )
+        if not tray.available:
+            self.log(f"Иконка в трее недоступна: {tray.error}", "warn")
+            return
+        self.tray = tray
+        self.tray_ok = tray.start()
+        if self.tray_ok:
+            self.tray.set_tooltip("SSH Drive — дисков: 0")
+            self.log("Иконка в трее активна: закрытие окна сворачивает программу", "dim")
+        else:
+            self.log(f"Не удалось показать иконку в трее: {tray.error or 'неизвестная ошибка'}", "warn")
+
+    def hide_to_tray(self) -> None:
+        if not self.tray_ok:
+            self._quit()
+            return
+        self.withdraw()
+        if not self._tray_hint_shown:
+            self._tray_hint_shown = True
+            if self.tray is not None:
+                self.tray.notify("Программа свёрнута в трей. Диски остаются подключёнными.")
+        self.log("Окно свёрнуто в трей (двойной клик по иконке — открыть)", "dim")
+
+    def _restore_window(self) -> None:
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------------
     # Логирование и обмен с фоновыми потоками
@@ -104,7 +165,7 @@ class App(tk.Tk):
                         self._append_log(traceback.format_exc(), "err")
         except queue.Empty:
             pass
-        self.after(100, self._drain)
+        self._drain_id = self.after(100, self._drain)
 
     def _append_log(self, text: str, level: str) -> None:
         self.log_text.configure(state="normal")
@@ -126,7 +187,8 @@ class App(tk.Tk):
         file_menu = tk.Menu(menu, tearoff=False)
         file_menu.add_command(label="Обновить список", command=self._refresh_tree)
         file_menu.add_separator()
-        file_menu.add_command(label="Выход", command=self._on_close)
+        file_menu.add_command(label="Свернуть в трей", command=self.hide_to_tray)
+        file_menu.add_command(label="Выход", command=self._quit)
         menu.add_cascade(label="Файл", menu=file_menu)
 
         tools = tk.Menu(menu, tearoff=False)
@@ -285,7 +347,10 @@ class App(tk.Tk):
         self.btn_install_key.configure(
             state="normal" if has and profile.auth == "key" else "disabled"
         )
-        self.count_var.set(f"Дисков подключено: {sum(1 for m in self.mounts.values() if m.alive)}")
+        connected_count = sum(1 for m in self.mounts.values() if m.alive)
+        self.count_var.set(f"Дисков подключено: {connected_count}")
+        if self.tray_ok and self.tray is not None:
+            self.tray.set_tooltip(f"SSH Drive — дисков: {connected_count}")
 
     # ------------------------------------------------------------------
     # Профили
@@ -303,6 +368,9 @@ class App(tk.Tk):
         profile = self._selected_profile()
         if profile is None:
             return
+        if profile.id in self.pending:
+            messagebox.showinfo("Профиль", "Профиль сейчас подключается — подождите.")
+            return
         if profile.id in self.mounts and self.mounts[profile.id].alive:
             messagebox.showinfo(
                 "Профиль", "Сначала отключите диск — настройки активного профиля менять нельзя."
@@ -317,6 +385,9 @@ class App(tk.Tk):
     def _delete_profile(self) -> None:
         profile = self._selected_profile()
         if profile is None:
+            return
+        if profile.id in self.pending:
+            messagebox.showinfo("Профиль", "Профиль сейчас подключается — подождите.")
             return
         if profile.id in self.mounts and self.mounts[profile.id].alive:
             messagebox.showinfo("Профиль", "Сначала отключите диск.")
@@ -337,8 +408,14 @@ class App(tk.Tk):
         title = f"Пароль SSH — {profile.user}@{profile.host}"
         return ask_secret(self, title, message, save_allowed=True, save_default=bool(profile.save_secret))
 
-    def _collect_secrets(self, profile: Profile) -> tuple[str, str] | None:
-        """Возвращает (пароль для входа, парольная фраза ключа) или None при отмене."""
+    def _collect_secrets(
+        self, profile: Profile, *, interactive: bool = True
+    ) -> tuple[str, str] | None:
+        """Возвращает (пароль для входа, парольная фраза ключа) или None.
+
+        interactive=False — для автоподключения: ничего не спрашиваем, а если
+        сохранённых секретов нет, возвращаем None.
+        """
         password = ""
         passphrase = ""
 
@@ -346,6 +423,8 @@ class App(tk.Tk):
             if profile.save_secret and profile.password_enc:
                 password = try_unprotect(profile.password_enc) or ""
             if not password:
+                if not interactive:
+                    return None
                 answer = self._ask_password(profile, f"Пароль для {profile.user}@{profile.host}:")
                 if answer is None:
                     return None
@@ -360,16 +439,19 @@ class App(tk.Tk):
         else:
             key_path = profile.key_path
             if not key_path or not Path(key_path).exists():
-                messagebox.showerror(
-                    "Ключ",
-                    "Ключ не найден. Нажмите «Изменить» → «Создать…», "
-                    "затем «Установить ключ».",
-                )
+                if interactive:
+                    messagebox.showerror(
+                        "Ключ",
+                        "Ключ не найден. Нажмите «Изменить» → «Создать…», "
+                        "затем «Установить ключ».",
+                    )
                 return None
             if keys.needs_passphrase(key_path):
                 if profile.save_secret and profile.passphrase_enc:
                     passphrase = try_unprotect(profile.passphrase_enc) or ""
                 if not passphrase:
+                    if not interactive:
+                        return None
                     answer = ask_secret(
                         self,
                         "Парольная фраза ключа",
@@ -425,15 +507,32 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # Подключение / отключение
     # ------------------------------------------------------------------
-    def _choose_drive(self, profile: Profile) -> str | None:
+    def _choose_drive(self, profile: Profile, *, auto: bool = False) -> str | None:
+        def busy(letter: str) -> bool:
+            return rclone.drive_exists(letter) or letter in self.reserved
+
         if profile.drive:
-            if rclone.drive_exists(profile.drive):
-                messagebox.showerror("Диск", f"Буква {profile.drive}: уже занята.")
+            if busy(profile.drive):
+                if auto:
+                    self.log(
+                        f"Автоподключение {profile.title}: буква {profile.drive}: уже занята — пропущено",
+                        "warn",
+                    )
+                else:
+                    messagebox.showerror("Диск", f"Буква {profile.drive}: уже занята.")
                 return None
             return profile.drive
-        free = rclone.free_letters()
+
+        # При автозапуске стараемся вернуть ту же букву, что была в прошлый раз.
+        if profile.last_drive and not busy(profile.last_drive):
+            return profile.last_drive
+
+        free = [letter for letter in rclone.free_letters() if letter not in self.reserved]
         if not free:
-            messagebox.showerror("Диск", "Нет свободных букв дисков.")
+            if auto:
+                self.log(f"Автоподключение {profile.title}: нет свободных букв", "warn")
+            else:
+                messagebox.showerror("Диск", "Нет свободных букв дисков.")
             return None
         return free[0]
 
@@ -441,34 +540,64 @@ class App(tk.Tk):
         profile = self._selected_profile()
         if profile is None:
             return
+        self._connect_profile(profile)
+
+    def _connect_profile(self, profile: Profile, *, auto: bool = False) -> None:
         handle = self.mounts.get(profile.id)
         if handle and handle.alive:
-            messagebox.showinfo("Подключение", f"Диск {handle.drive}: уже подключён.")
+            if not auto:
+                messagebox.showinfo("Подключение", f"Диск {handle.drive}: уже подключён.")
             return
         if profile.id in self.pending:
-            messagebox.showinfo("Подключение", "Этот профиль уже подключается…")
+            if not auto:
+                messagebox.showinfo("Подключение", "Этот профиль уже подключается…")
             return
+
         if not winfsp.is_installed():
-            if messagebox.askyesno(
+            if auto:
+                self.log(
+                    f"Автоподключение {profile.title}: WinFsp не установлен — пропущено",
+                    "warn",
+                )
+                self.states[profile.id] = "нужен WinFsp"
+                self._refresh_tree(profile.id)
+            elif messagebox.askyesno(
                 "Нужен WinFsp",
                 "Для показа диска в Windows нужен драйвер WinFsp.\nУстановить его сейчас?",
             ):
                 self._install_winfsp()
             return
         if not rclone.find_exe():
-            if messagebox.askyesno("Нужен rclone", "Скачать rclone сейчас?"):
+            if auto:
+                self.log(
+                    f"Автоподключение {profile.title}: rclone не найден — пропущено",
+                    "warn",
+                )
+                self.states[profile.id] = "нужен rclone"
+                self._refresh_tree(profile.id)
+            elif messagebox.askyesno("Нужен rclone", "Скачать rclone сейчас?"):
                 self._download_rclone()
             return
 
-        secrets = self._collect_secrets(profile)
+        secrets = self._collect_secrets(profile, interactive=not auto)
         if secrets is None:
+            if auto:
+                self.log(
+                    f"Автоподключение {profile.title}: нет сохранённого пароля "
+                    "или парольной фразы ключа — подключите вручную.",
+                    "warn",
+                )
+                self.states[profile.id] = "нужен пароль"
+                self._refresh_tree(profile.id)
             return
         password, passphrase = secrets
 
-        drive = self._choose_drive(profile)
+        drive = self._choose_drive(profile, auto=auto)
         if drive is None:
             return
 
+        self.reserved.add(drive)
+        self.pending_drives[profile.id] = drive
         self.states[profile.id] = "подключение…"
         self.pending.add(profile.id)
         self._refresh_tree(profile.id)
@@ -506,17 +635,32 @@ class App(tk.Tk):
             finally:
                 self.ui(self._connect_finished, profile, ok)
 
-        self.run_bg(f"Подключение {profile.title}", work)
+        label = f"Автоподключение {profile.title}" if auto else f"Подключение {profile.title}"
+        self.run_bg(label, work)
 
     def _connect_finished(self, profile: Profile, ok: bool) -> None:
         self.pending.discard(profile.id)
+        drive = self.pending_drives.pop(profile.id, None)
+        if drive:
+            self.reserved.discard(drive)
         if not ok:
             self.states[profile.id] = "ошибка (см. журнал)"
         self._refresh_tree(profile.id)
 
     def _on_mounted(self, profile: Profile, handle: rclone.MountHandle) -> None:
         self.mounts[profile.id] = handle
+        self.pending_drives.pop(profile.id, None)
+        self.reserved.discard(handle.drive)
         self.states[profile.id] = f"подключено ({handle.drive}:)"
+
+        # Запоминаем диск, чтобы поднять его при следующем запуске.
+        profile.auto_connect = True
+        profile.last_drive = handle.drive
+        try:
+            self.store.update(profile)
+        except OSError as exc:
+            self.log(f"Не удалось сохранить автоподключение: {exc}", "warn")
+
         self._refresh_tree(profile.id)
         self.log(f"Диск {handle.drive}: подключён к {profile.target}", "ok")
         threading.Thread(
@@ -544,9 +688,19 @@ class App(tk.Tk):
         profile = self._selected_profile()
         if profile is None:
             return
+        self._disconnect_profile(profile)
+
+    def _disconnect_profile(self, profile: Profile) -> None:
         handle = self.mounts.get(profile.id)
         if handle is None:
             return
+        # Явное отключение = «больше не подключать при старте».
+        if profile.auto_connect:
+            profile.auto_connect = False
+            try:
+                self.store.update(profile)
+            except OSError as exc:
+                self.log(f"Не удалось сохранить профиль: {exc}", "warn")
         self.mounts.pop(profile.id, None)
         self.states[profile.id] = "отключение…"
         self._refresh_tree(profile.id)
@@ -558,6 +712,20 @@ class App(tk.Tk):
             self.log(f"Диск {handle.drive}: отключён", "ok")
 
         self.run_bg("Отключение", work)
+
+    def _disconnect_all(self) -> None:
+        active = [
+            self.store.get(profile_id)
+            for profile_id, handle in list(self.mounts.items())
+            if handle.alive
+        ]
+        active = [profile for profile in active if profile is not None]
+        if not active:
+            self.log("Нет подключённых дисков", "dim")
+            return
+        self._restore_window()
+        for profile in active:
+            self._disconnect_profile(profile)
 
     # ------------------------------------------------------------------
     # Проверка входа и установка ключа
@@ -748,7 +916,7 @@ class App(tk.Tk):
         ]
         self.env_var.set("   |   ".join(parts))
 
-    def _startup_checks(self) -> None:
+    def _startup_checks(self, auto: bool = False) -> None:
         def work() -> None:
             exe = rclone.find_exe()
             version = rclone.version(exe) if exe else ""
@@ -767,6 +935,8 @@ class App(tk.Tk):
                 self.log(f"WinFsp {driver} установлен")
             if version and installed:
                 self.log("Окружение готово. Можно подключать диск.", "ok")
+            if auto:
+                self.ui(self._autoconnect)
 
         self.run_bg("Проверка окружения", work)
 
@@ -774,8 +944,31 @@ class App(tk.Tk):
         self.log("Проверяю окружение…")
         self._startup_checks()
 
+    def _autoconnect(self) -> None:
+        """Поднимает диски, которые были подключены при прошлом запуске."""
+        if self._autoconnect_done or self.smoke:
+            return
+        targets = [profile for profile in self.store.profiles if profile.auto_connect]
+        if not targets:
+            self._autoconnect_done = True
+            return
+        if not winfsp.is_installed() or not rclone.find_exe():
+            self._autoconnect_pending = True
+            self.log(
+                "Автоподключение отложено: сначала нужны WinFsp и rclone.", "warn"
+            )
+            return
+        self._autoconnect_done = True
+        self._autoconnect_pending = False
+        self.log(
+            f"Автоподключение при запуске: профилей {len(targets)}",
+            "info",
+        )
+        for profile in targets:
+            self._connect_profile(profile, auto=True)
+
     def _offer_rclone(self) -> None:
-        if self._asked_rclone or self.smoke:
+        if self._asked_rclone or self.smoke or os.environ.get("SSHDRIVE_NO_PROMPTS") == "1":
             return
         self._asked_rclone = True
         if messagebox.askyesno(
@@ -785,7 +978,7 @@ class App(tk.Tk):
             self._download_rclone()
 
     def _offer_winfsp(self) -> None:
-        if self._asked_winfsp or self.smoke:
+        if self._asked_winfsp or self.smoke or os.environ.get("SSHDRIVE_NO_PROMPTS") == "1":
             return
         self._asked_winfsp = True
         if messagebox.askyesno(
@@ -803,6 +996,8 @@ class App(tk.Tk):
             version = rclone.version(exe)
             self.ui(self._update_env, version, winfsp.version() if winfsp.is_installed() else "")
             self.log(f"rclone {version} готов", "ok")
+            if self._autoconnect_pending:
+                self.ui(self._autoconnect)
 
         self.run_bg("Скачивание rclone", work)
 
@@ -819,6 +1014,8 @@ class App(tk.Tk):
                 version,
             )
             self.log(f"WinFsp {version or 'не установлен'}", "ok" if installed else "err")
+            if installed and self._autoconnect_pending:
+                self.ui(self._autoconnect)
 
         self.run_bg("Установка WinFsp", work)
 
@@ -836,7 +1033,9 @@ class App(tk.Tk):
             messagebox.showerror("Папка данных", str(exc))
 
     def _open_readme(self) -> None:
-        readme = Path(__file__).resolve().parent.parent / "README.md"
+        readme = paths.bundled_file("README.md")
+        if readme is None:
+            readme = Path(__file__).resolve().parent.parent / "README.md"
         if readme.exists():
             os.startfile(str(readme))  # noqa: S606
         else:
@@ -850,9 +1049,11 @@ class App(tk.Tk):
     def _about(self) -> None:
         messagebox.showinfo(
             "SSH Drive",
-            "SSH Drive 1.0\n\n"
+            "SSH Drive 1.2\n\n"
             "Монтирует папку SSH-сервера как диск Windows.\n"
             "Движок: rclone + WinFsp, интерфейс: tkinter.\n"
+            "Закрытие окна сворачивает программу в трей; выход — через меню иконки.\n"
+            "Подключённые диски запоминаются и поднимаются при следующем запуске.\n"
             "Пароли хранятся в profiles.json в зашифрованном виде (DPAPI, текущий пользователь Windows).",
         )
 
@@ -860,7 +1061,20 @@ class App(tk.Tk):
     # Завершение
     # ------------------------------------------------------------------
     def _on_close(self) -> None:
+        """Крестик окна: свернуть в трей — диски продолжают работать."""
+        if self._quitting:
+            return
+        if self.smoke or not self.tray_ok:
+            self._quit()
+            return
+        self.hide_to_tray()
+
+    def _quit(self) -> None:
+        """Настоящий выход: отключить диски, убрать иконку и закрыть программу."""
+        if self._quitting:
+            return
         if self.pending:
+            self._restore_window()
             messagebox.showinfo(
                 "Выход",
                 "Идёт подключение. Дождитесь его завершения (обычно несколько секунд).",
@@ -868,6 +1082,7 @@ class App(tk.Tk):
             return
         active = [h for h in self.mounts.values() if h.alive]
         if active:
+            self._restore_window()
             if not messagebox.askyesno(
                 "Выход", f"Активных дисков: {len(active)}. Отключить их и выйти?"
             ):
@@ -877,6 +1092,15 @@ class App(tk.Tk):
                     handle.stop(timeout=6)
                 except Exception as exc:  # noqa: BLE001
                     self.log(f"Не удалось отключить {handle.drive}: {exc}", "warn")
+        self._quitting = True
+        if self._drain_id is not None:
+            try:
+                self.after_cancel(self._drain_id)
+            except tk.TclError:
+                pass
+            self._drain_id = None
+        if self.tray is not None:
+            self.tray.stop()
         self.destroy()
 
 
@@ -898,7 +1122,12 @@ def _acquire_single_instance() -> bool:
     kernel32.CloseHandle.restype = wintypes.BOOL
 
     ctypes.set_last_error(0)
-    handle = kernel32.CreateMutexW(None, False, "Local\\SSHDrive.SingleInstance")
+    name = "Local\\SSHDrive.SingleInstance"
+    suffix = os.environ.get("SSHDRIVE_INSTANCE", "").strip()
+    if suffix:
+        # отладочный запуск второго экземпляра рядом с рабочим
+        name += "." + suffix
+    handle = kernel32.CreateMutexW(None, False, name)
     if not handle:
         return True
     if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
@@ -914,7 +1143,13 @@ def main(argv: list[str] | None = None) -> int:
     if not smoke and not _acquire_single_instance():
         root = tk.Tk()
         root.withdraw()
-        messagebox.showinfo("SSH Drive", "SSH Drive уже запущен.", parent=root)
+        messagebox.showinfo(
+            "SSH Drive",
+            "SSH Drive уже запущен.\n\n"
+            "Окно могло быть свёрнуто в трей — посмотрите иконку рядом с часами "
+            "(двойной клик открывает окно).",
+            parent=root,
+        )
         root.destroy()
         return 0
     app = App(smoke=smoke)
@@ -922,5 +1157,8 @@ def main(argv: list[str] | None = None) -> int:
         app.after(1800, app.destroy)
     app.mainloop()
     if smoke:
-        print("SMOKE OK")
+        try:
+            print("SMOKE OK")
+        except Exception:  # noqa: BLE001 - в windowed-сборке stdout может отсутствовать
+            pass
     return 0

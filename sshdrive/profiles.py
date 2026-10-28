@@ -14,6 +14,12 @@ from . import paths
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
 
 
+def _drive_letter(value: object) -> str:
+    """Буква диска A-Z или пустая строка (значение приходит из JSON)."""
+    letter = str(value or "").strip().upper()[:1]
+    return letter if "A" <= letter <= "Z" else ""
+
+
 @dataclass
 class Profile:
     """Одно подключение: сервер + способ входа + буква диска."""
@@ -28,6 +34,8 @@ class Profile:
     remote_path: str = ""
     drive: str = ""  # пусто = выбрать автоматически
     read_only: bool = False
+    auto_connect: bool = False  # подключать при старте программы
+    last_drive: str = ""  # буква, которую занимал диск в прошлый раз
     extra_opts: str = ""
     save_secret: bool = False
     password_enc: str = ""
@@ -38,7 +46,8 @@ class Profile:
         if not isinstance(self.id, str) or not _ID_RE.fullmatch(self.id):
             self.id = uuid.uuid4().hex[:12]
         self.port = int(self.port or 22)
-        self.drive = (self.drive or "").strip().upper()[:1]
+        self.drive = _drive_letter(self.drive)
+        self.last_drive = _drive_letter(self.last_drive)
         if self.auth not in ("key", "password"):
             self.auth = "key"
 

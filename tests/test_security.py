@@ -142,7 +142,7 @@ class WinfspTests(TempEnv):
                 winfsp._check_signature(Path("x.msi"), None)
 
     def test_install_runs_signature_check_inside_elevated_process(self) -> None:
-        workdir = Path(tempfile.mkdtemp(dir=self.root))
+        workdir = Path(tempfile.mkdtemp(prefix="sshdrive-winfsp-"))
         msi = workdir / "winfsp.msi"
         msi.write_bytes(b"msi")
         captured = {}
@@ -170,6 +170,53 @@ class WinfspTests(TempEnv):
         self.assertLess(elevated.index("Get-AuthenticodeSignature"), elevated.index("msiexec.exe"))
         for name in winfsp.EXPECTED_SIGNERS:
             self.assertIn(f"'{name}'", elevated)
+
+
+class BundledMsiTests(TempEnv):
+    """offline-сборка: MSI лежит рядом с exe, а не в нашем временном каталоге."""
+
+    def _bundled(self) -> Path:
+        folder = self.root / "bundle"
+        folder.mkdir()
+        msi = folder / "winfsp-2.1.msi"
+        msi.write_bytes(b"msi")
+        (folder / "app.py").write_text("keep me")
+        return msi
+
+    def test_bundled_msi_is_signature_checked(self) -> None:
+        msi = self._bundled()
+        with mock.patch.object(paths, "bundled_glob", return_value=[msi]), \
+                mock.patch.object(winfsp, "_check_signature") as check:
+            self.assertEqual(winfsp.download(), msi)
+        check.assert_called_once()
+
+    def test_install_never_deletes_bundle_directory(self) -> None:
+        msi = self._bundled()
+        fake = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with mock.patch.object(winfsp, "download", return_value=msi), \
+                mock.patch.object(subprocess, "run", return_value=fake), \
+                mock.patch.object(winfsp, "is_installed", return_value=True):
+            winfsp.install()
+        self.assertTrue(msi.exists())
+        self.assertTrue((msi.parent / "app.py").exists())
+
+    def test_cleanup_removes_only_own_download_dirs(self) -> None:
+        own = Path(tempfile.mkdtemp(prefix="sshdrive-winfsp-"))
+        (own / "x.msi").write_bytes(b"1")
+        winfsp.cleanup_download(own / "x.msi")
+        self.assertFalse(own.exists())
+        stranger = self.root / "sshdrive-winfsp-lookalike"
+        stranger.mkdir()
+        (stranger / "x.msi").write_bytes(b"1")
+        winfsp.cleanup_download(stranger / "x.msi")
+        self.assertTrue(stranger.exists())
+
+    def test_find_exe_prefers_bundled_over_path(self) -> None:
+        bundled = self.root / "rclone.exe"
+        bundled.write_text("x")
+        with mock.patch.dict(os.environ, {"PATH": "", "SSHDRIVE_RCLONE": ""}), \
+                mock.patch.object(paths, "bundled_file", return_value=bundled):
+            self.assertEqual(rclone.find_exe(), str(bundled))
 
 
 # --- п. 4: загрузка rclone -----------------------------------------------------
@@ -366,6 +413,12 @@ class ProfileIdTests(unittest.TestCase):
         for bad in ("..\\..\\evil", "a/b", "", "x" * 64, 5):
             self.assertRegex(profiles.Profile(id=bad).id, r"^[0-9a-f]{12}$")
         self.assertEqual(profiles.Profile(id="abc123DEF-_").id, "abc123DEF-_")
+
+
+    def test_drive_letters_are_sanitised(self) -> None:
+        profile = profiles.Profile(drive="z", last_drive="-")
+        self.assertEqual((profile.drive, profile.last_drive), ("Z", ""))
+        self.assertEqual(profiles.Profile(drive="\u0416", last_drive="1").drive, "")
 
 
 class KeyAclTests(TempEnv):
