@@ -229,7 +229,7 @@ class ProfileDialog(tk.Toplevel):
         )
         ttk.Label(
             body,
-            text="например: --vfs-cache-max-size 4G --transfers 4",
+            text="например: --vfs-cache-max-size 4G --transfers 4 (разрешены только безопасные флаги)",
             foreground="#666666",
         ).grid(row=row + 1, column=1, columnspan=3, sticky="w")
         row += 2
@@ -320,6 +320,11 @@ class ProfileDialog(tk.Toplevel):
             return
         if not (1 <= port <= 65535):
             messagebox.showerror("Профиль", "Порт вне диапазона 1–65535.", parent=self)
+            return
+        try:
+            rclone.validate_extra(self.extra.get())
+        except rclone.RcloneError as exc:
+            messagebox.showerror("Профиль", str(exc), parent=self)
             return
 
         auth = self.auth.get()

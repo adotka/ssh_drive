@@ -389,35 +389,38 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # Проверка ключа хоста (вызывается из фонового потока)
     # ------------------------------------------------------------------
-    def confirm_host_key(
-        self, host: str, keytype: str, fingerprint: str, existing: tuple[str, ...] = ()
-    ) -> bool:
+    def _ask_yes_no_sync(self, title: str, text: str) -> bool:
+        """Показывает вопрос «Да/Нет» из фонового потока; без ответа — «Нет»."""
         event = threading.Event()
         result = {"ok": False}
 
-        if existing:
-            intro = (
-                f"Для {host} уже сохранены ключи: {', '.join(existing)}.\n"
-                f"Сервер предлагает ещё один ключ, тип {keytype}.\n\n"
-                "Это нормально, если сервер переустановили или добавили новый тип "
-                "ключа. Если вы этого не ожидали — не доверяйте."
-            )
-        else:
-            intro = f"Хост {host} ещё не известен."
-
         def ask() -> None:
-            result["ok"] = messagebox.askyesno(
-                "Новый SSH-сервер",
-                f"{intro}\n\n"
-                f"Тип ключа: {keytype}\nОтпечаток: {fingerprint}\n\n"
-                "Доверять этому серверу и запомнить ключ?",
-                parent=self,
-            )
+            result["ok"] = messagebox.askyesno(title, text, parent=self)
             event.set()
 
         self.ui(ask)
         event.wait(timeout=300)
         return bool(result["ok"])
+
+    def confirm_host_key(self, host: str, keytype: str, fingerprint: str) -> bool:
+        # Сюда доходим только для хоста без сохранённого ключа: если ключ уже
+        # известен, а сервер предъявил другой, подключение блокируется раньше.
+        return self._ask_yes_no_sync(
+            "Новый SSH-сервер",
+            f"Хост {host} ещё не известен.\n\n"
+            f"Тип ключа: {keytype}\nОтпечаток: {fingerprint}\n\n"
+            "Сверьте отпечаток с тем, который вам дал администратор сервера. "
+            "Доверять этому серверу и запомнить ключ?",
+        )
+
+    def confirm_admin_keys(self) -> bool:
+        return self._ask_yes_no_sync(
+            "Сервер Windows: учётная запись администратора",
+            "Вы вошли на сервер как администратор. Общий файл "
+            "administrators_authorized_keys действует для ВСЕХ администраторов "
+            "сервера: ключ из него позволит войти под любой из этих учётных записей.\n\n"
+            "Добавить ключ и в этот файл? (Обычно хватает «Нет».)",
+        )
 
     # ------------------------------------------------------------------
     # Подключение / отключение
@@ -684,7 +687,9 @@ class App(tk.Tk):
                 confirm=self.confirm_host_key,
             )
             try:
-                result = sshutil.install_public_key(client, pubkey)
+                result = sshutil.install_public_key(
+                    client, pubkey, confirm_admin=self.confirm_admin_keys
+                )
             finally:
                 client.close()
             self.log(f"Сервер: {result}", "ok")
@@ -754,7 +759,7 @@ class App(tk.Tk):
                 self.log("rclone не найден — без него нельзя создать диск.", "warn")
                 self.ui(self._offer_rclone)
             else:
-                self.log(f"rclone {version} найден")
+                self.log(f"rclone {version} найден: {exe}")
             if not installed:
                 self.log("WinFsp не найден — драйвер нужен для диска в Windows.", "warn")
                 self.ui(self._offer_winfsp)
@@ -848,7 +853,7 @@ class App(tk.Tk):
             "SSH Drive 1.0\n\n"
             "Монтирует папку SSH-сервера как диск Windows.\n"
             "Движок: rclone + WinFsp, интерфейс: tkinter.\n"
-            "Пароли хранятся в profiles.json в зашифрованном виде (DPAPI).",
+            "Пароли хранятся в profiles.json в зашифрованном виде (DPAPI, текущий пользователь Windows).",
         )
 
     # ------------------------------------------------------------------

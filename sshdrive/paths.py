@@ -7,6 +7,7 @@ known_hosts), а бинарники и кэш — в %LOCALAPPDATA%\\SSHDrive.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 APP_NAME = "SSHDrive"
@@ -74,6 +75,12 @@ def ensure_dirs() -> None:
     config = rclone_config_file()
     if not config.exists():
         config.write_text("", encoding="utf-8")
+    # Расшифрованные копии ключей, которые оставляли прошлые версии программы.
+    for stale in tmp_dir().glob("key-*.pem"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
     log = app_log_file()
     if log.exists() and log.stat().st_size > 2 * 1024 * 1024:
         try:
@@ -85,3 +92,45 @@ def ensure_dirs() -> None:
 def forward_slashes(path: str | os.PathLike[str]) -> str:
     """rclone на Windows надёжнее понимает пути с прямыми слэшами."""
     return str(path).replace("\\", "/")
+
+
+def system_exe(*parts: str) -> str:
+    """Абсолютный путь к утилите из System32.
+
+    Короткое имя («powershell», «net») CreateProcess ищет сначала в каталоге
+    python.exe и в текущем каталоге, поэтому подложенный файл имел бы приоритет.
+    """
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+    return str(Path(root, "System32", *parts))
+
+
+def powershell_exe() -> str:
+    return system_exe("WindowsPowerShell", "v1.0", "powershell.exe")
+
+
+def restrict_to_owner(path: str | os.PathLike[str]) -> None:
+    """Оставляет доступ к файлу только текущему пользователю (best effort).
+
+    На Windows os.chmod права не меняет, поэтому снимаем наследование ACL
+    и выдаём полный доступ одной учётной записи.
+    """
+    if os.name != "nt":
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return
+    user = os.environ.get("USERNAME")
+    if not user:
+        return
+    domain = os.environ.get("USERDOMAIN")
+    account = f"{domain}\\{user}" if domain else user
+    try:
+        subprocess.run(
+            [system_exe("icacls.exe"), str(path), "/inheritance:r", "/grant:r", f"{account}:F"],
+            capture_output=True,
+            timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:  # noqa: BLE001 - ACL не критичен для работы
+        pass

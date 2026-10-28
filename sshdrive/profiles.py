@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from . import paths
+
+_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
 
 
 @dataclass
@@ -31,6 +34,9 @@ class Profile:
     passphrase_enc: str = ""
 
     def __post_init__(self) -> None:
+        # id приходит из JSON и используется как идентификатор строки и потока.
+        if not isinstance(self.id, str) or not _ID_RE.fullmatch(self.id):
+            self.id = uuid.uuid4().hex[:12]
         self.port = int(self.port or 22)
         self.drive = (self.drive or "").strip().upper()[:1]
         if self.auth not in ("key", "password"):
