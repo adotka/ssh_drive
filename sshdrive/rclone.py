@@ -6,6 +6,7 @@ import ctypes
 import hashlib
 import io
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -33,6 +34,21 @@ USER_AGENT = "SSHDrive/1.0"
 PINNED_VERSION = "v1.75.2"
 PINNED_SHA256 = "8a9db2bad1dc79a65b3348fd857069598e2aab7cf4d118b77b1df23055aff818"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+# При монтировании WinFsp спрашивает у rclone, не символическая ли ссылка корень
+# диска «/» (readlink). Без --links rclone отвечает ENOSYS («ссылок нет»), драйвер
+# идёт дальше, но сам rclone при этом пишет ERROR. Это безвредно и бывает на каждом
+# подключении, поэтому такую строку (и только для корня) не показываем. Для других
+# путей сообщение значит реальное чтение ссылки и остаётся в журнале.
+_BENIGN_LINES = (
+    re.compile(r"\bsymlinks not supported without the --links flag: /\s*$"),
+)
+
+
+def is_benign_line(line: str) -> bool:
+    """Строка вывода rclone, которую не нужно показывать пользователю."""
+    return any(pattern.search(line) for pattern in _BENIGN_LINES)
 
 
 class RcloneError(RuntimeError):
@@ -458,7 +474,7 @@ def mount(
         assert proc.stdout is not None
         for line in proc.stdout:
             line = line.rstrip()
-            if not line:
+            if not line or is_benign_line(line):
                 continue
             handle.output.append(line)
             del handle.output[:-200]

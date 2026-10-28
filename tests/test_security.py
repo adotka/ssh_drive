@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -424,6 +425,43 @@ class ExtraOptsTests(unittest.TestCase):
         ):
             with self.assertRaises(rclone.RcloneError, msg=extra):
                 rclone.validate_extra(extra)
+
+
+class RcloneOutputTests(unittest.TestCase):
+    def test_root_readlink_probe_is_hidden(self) -> None:
+        line = "2026/10/28 20:33:55 ERROR : symlinks not supported without the --links flag: /"
+        self.assertTrue(rclone.is_benign_line(line))
+
+    def test_other_paths_and_errors_are_kept(self) -> None:
+        for line in (
+            "2026/10/28 20:33:55 ERROR : symlinks not supported without the --links flag: /docs/link",
+            "2026/10/28 20:33:55 ERROR : symlinks not supported without the --links flag: /x/",
+            "2026/10/28 20:33:55 Failed to mount: access denied",
+            "2026/10/28 20:33:55 NOTICE: sftp: handshake failed",
+        ):
+            self.assertFalse(rclone.is_benign_line(line), line)
+
+    def test_reader_drops_probe_but_keeps_real_output(self) -> None:
+        probe = "2026/10/28 20:33:55 ERROR : symlinks not supported without the --links flag: /"
+        lines = [probe + "\n", "The service rclone has been started.\n"]
+        proc = mock.Mock()
+        proc.stdout = iter(lines)
+        proc.poll.return_value = None
+        seen: list[str] = []
+        with mock.patch.object(rclone, "find_exe", return_value="rclone.exe"), \
+                mock.patch.object(rclone, "drive_exists", return_value=True), \
+                mock.patch.object(subprocess, "Popen", return_value=proc), \
+                tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"APPDATA": tmp, "LOCALAPPDATA": tmp}):
+            profile = profiles.Profile(host="h", user="u", auth="password")
+            with mock.patch.object(rclone, "obscure", return_value="x"), \
+                    mock.patch.object(rclone, "drive_exists", side_effect=[False, True]):
+                handle = rclone.mount(profile, password="p", drive="Z", on_line=seen.append)
+            deadline = time.monotonic() + 2
+            while len(seen) < 1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertEqual(seen, ["The service rclone has been started."])
+        self.assertEqual(handle.output, ["The service rclone has been started."])
 
 
 class ProfileIdTests(unittest.TestCase):
