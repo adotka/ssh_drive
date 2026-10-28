@@ -1,5 +1,8 @@
 .venv/
+.venv-build/
 __pycache__/
 *.py[cod]
 *.log
 *.msi
+build/
+dist/

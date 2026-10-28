@@ -7,6 +7,7 @@ known_hosts), а бинарники и кэш — в %LOCALAPPDATA%\\SSHDrive.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 APP_NAME = "SSHDrive"
@@ -85,3 +86,21 @@ def ensure_dirs() -> None:
 def forward_slashes(path: str | os.PathLike[str]) -> str:
     """rclone на Windows надёжнее понимает пути с прямыми слэшами."""
     return str(path).replace("\\", "/")
+
+
+def resource_dir() -> Path:
+    """Каталог встроенных в exe файлов (или корень проекта при запуске из исходников)."""
+    bundled = getattr(sys, "_MEIPASS", None)
+    if bundled:
+        return Path(bundled)
+    return Path(__file__).resolve().parent.parent
+
+
+def bundled_file(name: str) -> Path | None:
+    """Файл, положенный рядом с exe/в exe (rclone.exe, MSI, README)."""
+    candidate = resource_dir() / name
+    return candidate if candidate.is_file() else None
+
+
+def bundled_glob(pattern: str) -> list[Path]:
+    return sorted(path for path in resource_dir().glob(pattern) if path.is_file())

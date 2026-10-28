@@ -218,9 +218,15 @@ class ProfileDialog(tk.Toplevel):
         self.drive.set(self._profile.drive or "авто")
 
         row += 1
-        ttk.Checkbutton(body, text="Только чтение", variable=self.read_only).grid(
-            row=row, column=1, sticky="w", pady=(6, 0)
-        )
+        self.auto_connect = tk.BooleanVar(value=self._profile.auto_connect)
+        checks = ttk.Frame(body)
+        checks.grid(row=row, column=1, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(checks, text="Только чтение", variable=self.read_only).pack(side="left")
+        ttk.Checkbutton(
+            checks,
+            text="Подключать при запуске программы",
+            variable=self.auto_connect,
+        ).pack(side="left", padx=(18, 0))
 
         row += 1
         ttk.Label(body, text="Доп. опции rclone").grid(row=row, column=0, sticky="w", pady=(10, 3))
@@ -342,6 +348,7 @@ class ProfileDialog(tk.Toplevel):
         self._profile.auth = auth
         self._profile.remote_path = self.remote_path.get().strip()
         self._profile.read_only = bool(self.read_only.get())
+        self._profile.auto_connect = bool(self.auto_connect.get())
         self._profile.extra_opts = self.extra.get().strip()
         self._profile.save_secret = bool(self.save_secret.get())
         selected_drive = self.drive.get()

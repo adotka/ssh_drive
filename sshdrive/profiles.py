@@ -25,6 +25,8 @@ class Profile:
     remote_path: str = ""
     drive: str = ""  # пусто = выбрать автоматически
     read_only: bool = False
+    auto_connect: bool = False  # подключать при старте программы
+    last_drive: str = ""  # буква, которую занимал диск в прошлый раз
     extra_opts: str = ""
     save_secret: bool = False
     password_enc: str = ""
@@ -33,6 +35,7 @@ class Profile:
     def __post_init__(self) -> None:
         self.port = int(self.port or 22)
         self.drive = (self.drive or "").strip().upper()[:1]
+        self.last_drive = (self.last_drive or "").strip().upper()[:1]
         if self.auth not in ("key", "password"):
             self.auth = "key"
 
